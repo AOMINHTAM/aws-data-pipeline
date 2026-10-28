@@ -1,0 +1,32 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment & Credentials
+.env
+.env.*
+*.pem
+credentials
+~/.aws/
+
+# dbt
+dbt/target/
+dbt/dbt_packages/
+dbt/logs/
+
+# Airflow / Astro
+.astro/
+airflow_settings.yaml
+logs/
+
+# Data files (CSV raw)
+data/
+*.csv
+*.zip
+
+# OS & IDE
+.DS_Store
+.idea/
+.vscode/
+Thumbs.db

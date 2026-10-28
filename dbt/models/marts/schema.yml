@@ -1,0 +1,44 @@
+version: 2
+
+models:
+  - name: fct_orders
+    description: "Bảng Fact chính lưu trữ toàn bộ đơn hàng kèm các chỉ số doanh thu, vận chuyển và đánh giá"
+    columns:
+      - name: order_id
+        description: "Khóa chính (Primary Key) của đơn hàng"
+        tests:
+          - unique
+          - not_null
+      - name: customer_id
+        description: "Khóa ngoại liên kết với bảng dim_customers"
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_customers')
+              field: customer_id
+      - name: total_payment_value
+        description: "Tổng số tiền thanh toán thực tế của đơn hàng"
+      - name: is_delayed
+        description: "Cờ đánh dấu đơn hàng có bị giao trễ hạn dự kiến hay không (1 = Trễ, 0 = Đúng hạn)"
+
+  - name: dim_customers
+    description: "Bảng Dimension lưu trữ thông tin khách hàng, phân khúc và tổng chi tiêu trọn đời (LTV)"
+    columns:
+      - name: customer_id
+        description: "Khóa chính của khách hàng cho mỗi đơn"
+        tests:
+          - unique
+          - not_null
+      - name: customer_unique_id
+        description: "Định danh duy nhất của mỗi người dùng thật"
+        tests:
+          - not_null
+
+  - name: dim_products
+    description: "Bảng Dimension lưu trữ danh mục sản phẩm đã được dịch sang tiếng Anh kèm kích thước, trọng lượng"
+    columns:
+      - name: product_id
+        description: "Khóa chính của sản phẩm"
+        tests:
+          - unique
+          - not_null

@@ -1,0 +1,8 @@
+# Astronomer Cosmos để tích hợp dbt vào Airflow DAG
+astronomer-cosmos
+
+# Adapter dbt cho Redshift
+dbt-redshift
+
+# Provider AWS cho Airflow (S3, Redshift)
+apache-airflow-providers-amazon

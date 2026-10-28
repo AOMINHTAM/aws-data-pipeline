@@ -1,0 +1,26 @@
+version: 2
+
+sources:
+  - name: raw_data
+    database: dev
+    schema: raw_data
+    description: "Bộ dữ liệu thô Olist Brazilian E-Commerce được nạp từ S3"
+    tables:
+      - name: orders
+        description: "Bảng đơn hàng thô"
+      - name: order_items
+        description: "Bảng chi tiết các mặt hàng trong đơn hàng"
+      - name: order_payments
+        description: "Bảng thanh toán đơn hàng"
+      - name: order_reviews
+        description: "Bảng đánh giá đơn hàng từ khách hàng"
+      - name: customers
+        description: "Bảng thông tin khách hàng"
+      - name: products
+        description: "Bảng thông tin sản phẩm"
+      - name: sellers
+        description: "Bảng thông tin người bán"
+      - name: product_category_name_translation
+        description: "Bảng dịch danh mục sản phẩm từ tiếng Bồ Đào Nha sang tiếng Anh"
+      - name: geolocation
+        description: "Bảng tọa độ địa lý các vùng ở Brazil"

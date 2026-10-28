@@ -1,0 +1,12 @@
+ecommerce_dbt:
+  target: dev
+  outputs:
+    dev:
+      type: redshift
+      host: ecommerce-workgroup.205506434601.us-east-1.redshift-serverless.amazonaws.com
+      user: admin
+      password: "{{ env_var('DBT_REDSHIFT_PASSWORD') }}"
+      port: 5439
+      dbname: dev
+      schema: public
+      threads: 4
