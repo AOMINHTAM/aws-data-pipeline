@@ -138,8 +138,8 @@ aws_data_pipeline/
 ### 2. Setup Infrastructure & Credentials
 1. Clone the repository:
    ```bash
-   git clone https://github.com/AOMINHTAM/aws_data_pipeline.git
-   cd aws_data_pipeline
+   git clone https://github.com/AOMINHTAM/aws-data-pipeline.git
+   cd aws-data-pipeline
    ```
 2. Verify AWS CLI connectivity:
    ```bash
