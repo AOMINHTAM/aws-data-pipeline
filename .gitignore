@@ -20,8 +20,9 @@ dbt/logs/
 airflow_settings.yaml
 logs/
 
-# Data files (CSV raw)
+# Data files (CSV raw & exports)
 data/
+exports/
 *.csv
 *.zip
 

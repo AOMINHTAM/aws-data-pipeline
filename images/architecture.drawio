@@ -1,0 +1,133 @@
+<mxfile host="app.diagrams.net" type="device">
+  <diagram id="aws-elt-architecture" name="AWS E-Commerce Data Pipeline">
+    <mxGraphModel dx="2200" dy="1100" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="0" pageScale="1" pageWidth="2400" pageHeight="1100" background="#ffffff" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- 1. TOP BOX: APACHE AIRFLOW (Astro CLI & Docker) -->
+        <mxCell id="airflow_box" value="APACHE AIRFLOW (Astro CLI &amp; Docker)&#xa;(Orchestration &amp; Task Scheduler)" style="rounded=1;whiteSpace=wrap;html=1;arcSize=16;sketch=1;curveFitting=1;jiggle=2;strokeWidth=2;strokeColor=#1e1e1e;fillColor=#ffffff;fontFamily=Comic Sans MS;fontSize=18;fontStyle=0;" vertex="1" parent="1">
+          <mxGeometry x="960" y="40" width="680" height="130" as="geometry" />
+        </mxCell>
+
+        <!-- Arrow Airflow -> Redshift -->
+        <mxCell id="airflow_arrow" value="" style="endArrow=open;endFill=0;endSize=14;html=1;sketch=1;strokeWidth=2;strokeColor=#1e1e1e;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1300" y="170" as="sourcePoint" />
+            <mxPoint x="1300" y="290" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="lbl_trigger" value="Trigger dbt DAG" style="text;html=1;align=right;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontFamily=Comic Sans MS;fontSize=16;" vertex="1" parent="1">
+          <mxGeometry x="1110" y="215" width="160" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="lbl_cosmos" value="(via Astronomer Cosmos)" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontFamily=Comic Sans MS;fontSize=16;" vertex="1" parent="1">
+          <mxGeometry x="1330" y="215" width="210" height="30" as="geometry" />
+        </mxCell>
+
+        <!-- 2. FAR LEFT: OLIST RAW DATA -->
+        <mxCell id="raw_csv_box" value="Raw E-Commerce&#xa;Data (Olist)&#xa;(9 CSVs • ~100k Orders)" style="rounded=1;whiteSpace=wrap;html=1;arcSize=14;sketch=1;curveFitting=1;jiggle=2;strokeWidth=2;strokeColor=#1e1e1e;fillColor=#ffffff;fontFamily=Comic Sans MS;fontSize=16;" vertex="1" parent="1">
+          <mxGeometry x="30" y="450" width="220" height="160" as="geometry" />
+        </mxCell>
+
+        <!-- Arrow Raw CSV -> S3 -->
+        <mxCell id="arrow_csv_s3" value="Bash &amp; AWS CLI&#xa;(WSL2 • upload_to_s3.sh)" style="endArrow=open;endFill=0;endSize=14;html=1;sketch=1;strokeWidth=2;strokeColor=#1e1e1e;fontFamily=Comic Sans MS;fontSize=14;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="250" y="530" as="sourcePoint" />
+            <mxPoint x="460" y="530" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <!-- 3. AMAZON S3 BOX -->
+        <mxCell id="s3_box" value="Amazon S3&#xa;Raw Data Lake&#xa;(Bronze • s3://.../raw/)" style="rounded=1;whiteSpace=wrap;html=1;arcSize=14;sketch=1;curveFitting=1;jiggle=2;strokeWidth=2;strokeColor=#1e1e1e;fillColor=#ffffff;fontFamily=Comic Sans MS;fontSize=16;" vertex="1" parent="1">
+          <mxGeometry x="460" y="450" width="210" height="160" as="geometry" />
+        </mxCell>
+
+        <!-- 4. MAIN WAREHOUSE CONTAINER: AMAZON REDSHIFT SERVERLESS -->
+        <mxCell id="redshift_outer" value="" style="rounded=1;whiteSpace=wrap;html=1;arcSize=6;sketch=1;curveFitting=1;jiggle=2;strokeWidth=2;strokeColor=#1e1e1e;fillColor=#ffffff;" vertex="1" parent="1">
+          <mxGeometry x="820" y="290" width="1020" height="510" as="geometry" />
+        </mxCell>
+        <mxCell id="redshift_title" value="AMAZON REDSHIFT SERVERLESS (4 RPUs • CLOUD DATA WAREHOUSE)" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontFamily=Comic Sans MS;fontSize=19;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="960" y="385" width="740" height="35" as="geometry" />
+        </mxCell>
+        <mxCell id="finops_badge" value="AWS Budgets ($5/mo Alert) | VPC Security Group (Port 5439)" style="rounded=1;whiteSpace=wrap;html=1;arcSize=20;sketch=1;strokeWidth=1.5;strokeColor=#1e1e1e;fillColor=#ffffff;fontFamily=Comic Sans MS;fontSize=14;" vertex="1" parent="1">
+          <mxGeometry x="1310" y="315" width="500" height="44" as="geometry" />
+        </mxCell>
+
+        <!-- RAW LAYER (Directly inside Redshift - no extra wrapper box) -->
+        <mxCell id="raw_layer" value="RAW LAYER&#xa;(raw_data)&#xa;9 Raw Tables" style="rounded=1;whiteSpace=wrap;html=1;arcSize=14;sketch=1;curveFitting=1;jiggle=2;strokeWidth=2;strokeColor=#1e1e1e;fillColor=#ffffff;fontFamily=Comic Sans MS;fontSize=16;" vertex="1" parent="1">
+          <mxGeometry x="860" y="455" width="230" height="150" as="geometry" />
+        </mxCell>
+
+        <!-- Arrow S3 -> RAW LAYER directly -->
+        <mxCell id="arrow_s3_rs" value="Redshift COPY&#xa;(MPP Bulk Load)" style="endArrow=open;endFill=0;endSize=14;html=1;sketch=1;strokeWidth=2;strokeColor=#1e1e1e;fontFamily=Comic Sans MS;fontSize=14;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="670" y="530" as="sourcePoint" />
+            <mxPoint x="860" y="530" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <!-- IAM Role Box -->
+        <mxCell id="iam_box" value="AWS IAM Role&#xa;(RedshiftS3ReadOnlyRole)&#xa;STS AssumeRole (Zero Keys)" style="rounded=1;whiteSpace=wrap;html=1;arcSize=16;sketch=1;curveFitting=1;jiggle=2;strokeWidth=2;strokeColor=#1e1e1e;fillColor=#ffffff;fontFamily=Comic Sans MS;fontSize=15;" vertex="1" parent="1">
+          <mxGeometry x="490" y="680" width="290" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="arrow_iam" value="" style="endArrow=open;endFill=0;endSize=14;html=1;sketch=1;strokeWidth=2;strokeColor=#1e1e1e;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="750" y="680" as="sourcePoint" />
+            <mxPoint x="750" y="540" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <!-- STAGING LAYER -->
+        <mxCell id="stg_layer" value="STAGING LAYER&#xa;(public_staging)&#xa;7 Views (stg_*)" style="rounded=1;whiteSpace=wrap;html=1;arcSize=14;sketch=1;curveFitting=1;jiggle=2;strokeWidth=2;strokeColor=#1e1e1e;fillColor=#ffffff;fontFamily=Comic Sans MS;fontSize=16;" vertex="1" parent="1">
+          <mxGeometry x="1180" y="455" width="250" height="150" as="geometry" />
+        </mxCell>
+
+        <!-- MARTS LAYER -->
+        <mxCell id="marts_layer" value="MARTS LAYER&#xa;(public_marts • Star Schema)&#xa;fct_orders | dim_customers&#xa;dim_products" style="rounded=1;whiteSpace=wrap;html=1;arcSize=14;sketch=1;curveFitting=1;jiggle=2;strokeWidth=2;strokeColor=#1e1e1e;fillColor=#ffffff;fontFamily=Comic Sans MS;fontSize=15;" vertex="1" parent="1">
+          <mxGeometry x="1510" y="455" width="285" height="150" as="geometry" />
+        </mxCell>
+
+        <mxCell id="arrow_raw_stg" value="source()" style="endArrow=open;endFill=0;endSize=14;html=1;sketch=1;strokeWidth=2;strokeColor=#1e1e1e;fontFamily=Comic Sans MS;fontSize=13;" edge="1" parent="1" source="raw_layer" target="stg_layer">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="arrow_stg_marts" value="" style="endArrow=open;endFill=0;endSize=14;html=1;sketch=1;strokeWidth=2;strokeColor=#1e1e1e;" edge="1" parent="1" source="stg_layer" target="marts_layer">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Bottom dbt Line & Arrows strictly under STAGING & MARTS -->
+        <mxCell id="dbt_line" value="" style="endArrow=none;html=1;sketch=1;strokeWidth=2;strokeColor=#1e1e1e;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1180" y="675" as="sourcePoint" />
+            <mxPoint x="1795" y="675" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="dbt_up_arrow_stg" value="" style="endArrow=open;endFill=0;endSize=14;html=1;sketch=1;strokeWidth=2;strokeColor=#1e1e1e;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1305" y="675" as="sourcePoint" />
+            <mxPoint x="1305" y="605" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="dbt_up_arrow_marts" value="" style="endArrow=open;endFill=0;endSize=14;html=1;sketch=1;strokeWidth=2;strokeColor=#1e1e1e;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1652" y="675" as="sourcePoint" />
+            <mxPoint x="1652" y="605" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="dbt_text" value="dbt-core + dbt-redshift (SQL Transformations &amp; 9/9 Quality Tests)" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontFamily=Comic Sans MS;fontSize=16;" vertex="1" parent="1">
+          <mxGeometry x="1195" y="690" width="585" height="35" as="geometry" />
+        </mxCell>
+
+        <!-- 5. FAR RIGHT: BI & ANALYTICS -->
+        <mxCell id="arrow_export" value="SQL Export (Port 5439)&#xa;(Extract to save RPU costs)" style="endArrow=open;endFill=0;endSize=14;html=1;sketch=1;strokeWidth=2;strokeColor=#1e1e1e;fontFamily=Comic Sans MS;fontSize=14;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1795" y="530" as="sourcePoint" />
+            <mxPoint x="2000" y="530" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="bi_box" value="BI &amp; ANALYTICS&#xa;Python (export_to_csv.py)&#xa;redshift-connector + pandas&#xa;4 Clean CSVs &amp; Power BI" style="rounded=1;whiteSpace=wrap;html=1;arcSize=14;sketch=1;curveFitting=1;jiggle=2;strokeWidth=2;strokeColor=#1e1e1e;fillColor=#ffffff;fontFamily=Comic Sans MS;fontSize=16;" vertex="1" parent="1">
+          <mxGeometry x="2000" y="435" width="260" height="190" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

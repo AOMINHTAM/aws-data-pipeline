@@ -14,24 +14,14 @@ The pipeline ingests, transforms, and tests real-world e-commerce data from the 
 
 ## 🏛️ System Architecture
 
-```mermaid
-flowchart LR
-    subgraph Ingestion ["1. Data Ingestion (EL)"]
-        Local["Local CSVs (Olist)"] -->|"Bash Script / AWS CLI"| S3["Amazon S3\n(Raw Data Lake)"]
-        S3 -->|"Redshift COPY (MPP)\nvia IAM Role"| RedshiftRaw["Amazon Redshift Serverless\n(Schema: raw_data)"]
-    end
+![AWS E-Commerce ELT System Architecture](images/architecture.png)
 
-    subgraph Transformation ["2. Data Modeling & Testing (T)"]
-        RedshiftRaw -->|"dbt-redshift"| Staging["Staging Views (7 Views)\nLight Cleansing & Renaming"]
-        Staging -->|"dbt Core (Kimball)"| Marts["Marts Tables (Star Schema)\nfct_orders | dim_customers | dim_products"]
-        Marts -->|"dbt test"| Tests["9/9 Automated Quality Tests\n(Unique, Not Null, Referential Integrity)"]
-    end
+> Editable Draw.io source: [`images/architecture.drawio`](images/architecture.drawio)
 
-    subgraph Orchestration ["3. Orchestration"]
-        Airflow["Apache Airflow (Astro CLI)\n+ Astronomer Cosmos"] -.->|"Automates & Observes"| Ingestion
-        Airflow -.->|"Dynamically Generates DAG"| Transformation
-    end
-```
+1. **Extract & Load (EL):** Local Olist CSVs (`~100k` orders across 9 datasets) are synced from WSL2 Ubuntu to an **Amazon S3** private Bronze bucket via [`scripts/upload_to_s3.sh`](scripts/upload_to_s3.sh), then bulk-loaded into **Amazon Redshift Serverless** (`raw_data` schema) using parallel `COPY` commands authenticated via **AWS IAM Role** (`RedshiftS3ReadOnlyRole`, zero hardcoded credentials).
+2. **Transform & Test (T):** **dbt Core (`dbt-redshift`)** reads `raw_data` via `source()` to build 7 lightweight **Staging Views** (`public_staging`) and 3 **Kimball Star Schema Marts Tables** (`public_marts`: `fct_orders`, `dim_customers`, `dim_products`), validated by **9/9 automated data quality tests**.
+3. **Orchestration:** **Apache Airflow** (containerized with **Docker** & **Astro CLI**) dynamically parses and triggers the dbt DAG via **Astronomer Cosmos** (`DbtTaskGroup`).
+4. **Serving & Cost-Optimized BI:** [`scripts/export_to_csv.py`](scripts/export_to_csv.py) extracts the clean marts tables into analytical CSVs (`exports/`) via `redshift-connector` and `pandas` so **Power BI** can consume them offline without waking Redshift RPUs on every refresh.
 
 ---
 
@@ -53,7 +43,8 @@ Clean dependency graph illustrating data flow from 9 raw sources through 7 stagi
 
 ### 1. Cloud Infrastructure & FinOps (Cost-Optimization)
 * **Amazon Redshift Serverless:** Configured with minimum base capacity of **4 RPUs** (compute scales down to \$0 when idle), cutting computing costs by 50% compared to standard 8-RPU setups.
-* **AWS Budgets:** Configured strict budget guardrails with email alerting thresholds to eliminate financial surprises.
+* **AWS Budgets:** Configured strict budget guardrails (\$5/month alert) to eliminate financial surprises.
+* **Decoupled BI Extraction:** [`scripts/export_to_csv.py`](scripts/export_to_csv.py) exports clean marts tables to local CSVs (`exports/`) so Power BI refreshes consume flat files instead of waking Redshift RPUs on every query.
 * **Storage Optimization:** Amazon S3 standard storage with blocked public access (100% private bucket).
 
 ### 2. Cloud Security & Governance
@@ -99,15 +90,18 @@ aws_data_pipeline/
 │           ├── dim_customers.sql
 │           └── dim_products.sql
 ├── data/                       # Olist CSV files (git-ignored)
-├── images/                     # Lineage graph and Airflow execution screenshots
+├── exports/                    # Clean analytics CSV exports for Power BI (git-ignored)
+├── images/                     # Architecture diagram (PNG & Draw.io), lineage & Airflow screenshots
 ├── scripts/
 │   ├── upload_to_s3.sh         # Bash script for S3 raw data synchronization
 │   ├── create_raw_tables.sql   # Redshift DDL for raw schema
-│   └── copy_raw_tables.sql     # Redshift COPY commands from S3
+│   ├── copy_raw_tables.sql     # Redshift COPY commands from S3
+│   └── export_to_csv.py        # Python script exporting marts tables to CSV via redshift-connector
 ├── .env                        # Environment variables & secrets (git-ignored)
 ├── .gitignore
 ├── Dockerfile                  # Astronomer Runtime Dockerfile
-├── Makefile                    # Automation shortcuts (verify, upload, etc.)
+├── Makefile                    # Automation shortcuts (verify, upload, export)
+├── PROJECT_ACCEPTANCE_REPORT.md # Project sign-off & acceptance checklist
 └── requirements.txt            # Python dependencies (cosmos, dbt-redshift)
 ```
 
@@ -119,11 +113,12 @@ aws_data_pipeline/
 | :--- | :--- | :--- |
 | **Cloud Provider** | AWS (Amazon Web Services) | Infrastructure host |
 | **Object Storage** | Amazon S3 | Raw Data Lake (Landing Zone) |
-| **Data Warehouse** | Amazon Redshift Serverless | Scalable MPP Cloud Data Warehouse |
+| **Data Warehouse** | Amazon Redshift Serverless | Scalable MPP Cloud Data Warehouse (4 RPUs) |
 | **Transformation** | dbt Core (`dbt-redshift`) | SQL Transformation, Kimball Modeling & Tests |
 | **Orchestration** | Apache Airflow (Astro CLI) | Workflow scheduling & DAG management |
 | **Integration** | Astronomer Cosmos | Native dbt-Airflow task parsing |
 | **Containerization** | Docker / Docker Compose | Local containerized Airflow runtime |
+| **Data Export & BI** | Python (`redshift-connector`, `pandas`) & Power BI | Cost-optimized mart extraction & analytics |
 | **OS / Shell** | Ubuntu (WSL2) + Bash | Linux development environment |
 
 ---
@@ -166,6 +161,12 @@ aws_data_pipeline/
    ```
 2. Open your browser at `http://localhost:8080`.
 3. Locate DAG `ecommerce_aws_data_pipeline`, toggle **ON**, and trigger execution!
+
+### 5. Export Marts for BI & Analytics
+Extract the transformed Star Schema marts into clean local CSVs in `exports/` (to save Redshift RPU compute costs during Power BI analysis):
+```bash
+make export-data
+```
 
 ---
 
