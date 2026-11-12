@@ -6,26 +6,26 @@
 
 | Thuộc tính | Chi tiết |
 | :--- | :--- |
-| **Tên dự án** | **End-to-End AWS E-Commerce Data Pipeline & Kimball Star Schema Analytics** |
+| **Tên dự án** | **End-to-End Event-Driven AWS E-Commerce Data Pipeline & Kimball Star Schema Analytics (V3)** |
 | **Kỹ sư thực hiện** | Ao Minh Tam ([@AOMINHTAM](https://github.com/AOMINHTAM)) |
 | **Repository** | [github.com/AOMINHTAM/aws-data-pipeline](https://github.com/AOMINHTAM/aws-data-pipeline) |
 | **Dataset sử dụng** | Olist Brazilian E-Commerce Dataset (~120MB, ~100k đơn hàng, 9 quan hệ) |
-| **Công nghệ cốt lõi** | AWS (S3, Redshift Serverless, IAM), dbt Core, Apache Airflow (Astronomer Cosmos), Docker, Python (`redshift-connector`, `pandas`), WSL2 Ubuntu |
-| **Thời gian hoàn thành**| Tháng 10/2026 |
-| **Trạng thái** | ✅ **HOÀN THÀNH TOÀN DIỆN (100% ACCEPTED)** |
+| **Công nghệ cốt lõi** | AWS (S3, Redshift Serverless, IAM), dbt Core, Apache Airflow 3 (Astro CLI & Astronomer Cosmos), Docker, Python (`redshift-connector`, `pandas`), WSL2 Ubuntu |
+| **Lịch sử hoàn thành** | **V2 (Baseline):** Tháng 10/2026 • **V3 (Event-Driven Automation):** Tháng 11/2026 |
+| **Trạng thái** | ✅ **HOÀN THÀNH TOÀN DIỆN (100% ACCEPTED & LIVE VERIFIED)** |
 
 ---
 
-## 🏗️ KIẾN TRÚC HỆ THỐNG ĐÃ XÂY DỰNG
+## 🏗️ KIẾN TRÚC HỆ THỐNG ĐÃ XÂY DỰNG (V3 EVENT-DRIVEN)
 
 ```mermaid
 flowchart LR
-    A["Raw Data (CSV)\n(9 datasets)"] -->|"scripts/upload_to_s3.sh"| B["AWS S3 Data Lake\n(Bronze Storage)"]
-    B -->|"SQL COPY Command\n(IAM Role Auth)"| C["Amazon Redshift Serverless\n(raw_data schema)"]
-    C -->|"dbt Staging (Views)\n(public_staging)"| D["dbt Transform"]
-    D -->|"dbt Marts (Tables)\n(public_marts - Star Schema)"| E["Kimball Data Warehouse\n• fct_orders\n• dim_customers\n• dim_products"]
-    E -->|"Airflow DAG\n(Astronomer Cosmos)"| F["Automated Orchestration"]
-    E -->|"Python Export\n(redshift-connector)"| G["Business Consumption\n(Power BI / CSVs / Pandas)"]
+    A["Raw Data (CSV)\n(9 datasets)"] -->|"scripts/upload_to_s3.sh\n(aws s3 sync)"| B["Amazon S3 Landing\n(s3://.../raw/)"]
+    B -->|"1. S3KeySensor (*/15)\nEmpty -> SKIP ($0 RPU)"| C["Apache Airflow 3\n(Astro CLI / Cosmos)"]
+    C -->|"2. @task load_raw_from_s3\n(TRUNCATE + COPY via IAM)"| D["Redshift Serverless (4 RPUs)\n(raw_data Bronze)"]
+    D -->|"3. dbt Staging Views\n(public_staging)"| E["dbt Marts Tables\n(public_marts Star Schema\n& 9/9 Quality Tests)"]
+    E -->|"4. @task archive_s3_files\n(Move raw/ -> archive/<ts>/)"| F["Amazon S3 Archive\n(Zero Duplicates)"]
+    E -->|"Python Export\n(redshift-connector)"| G["BI Consumption\n(Power BI / CSVs / Pandas)"]
 ```
 
 ---
@@ -34,13 +34,14 @@ flowchart LR
 
 | STT | Hạng mục công việc | Tiêu chí nghiệm thu | Kết quả | Trạng thái |
 | :---: | :--- | :--- | :--- | :---: |
-| **1** | **Bảo mật & Môi trường Base** | Môi trường Linux Ubuntu WSL2, phân quyền IAM User tối thiểu (`least privilege`), AWS CLI v2 cấu hình bảo mật `chmod 600`, quản lý source code bằng Git. | Hoàn thành, bảo mật credentials tuyệt đối qua `.env`. | **ĐẠT** |
+| **1** | **Bảo mật & Môi trường Base** | Môi trường Linux Ubuntu WSL2, phân quyền IAM User tối thiểu (`least privilege`), AWS CLI v2, quản lý source code bằng Git. | Hoàn thành, bảo mật credentials + `AIRFLOW_CONN_AWS_DEFAULT` qua `.env` (git-ignored). | **ĐẠT** |
 | **2** | **Hạ tầng AWS Cloud & Chi phí** | Thiết lập S3 Bucket bảo mật private, Amazon Redshift Serverless 4 RPU, cấu hình AWS Budget Alert kiểm soát ngưỡng \$5/tháng. | Hoàn thành, không vượt chi phí dự toán. | **ĐẠT** |
-| **3** | **Data Ingestion (Data Lake -> DWH)** | Viết kịch bản tự động upload S3, tạo DDL schema `raw_data` và nạp 9 bảng raw qua lệnh `COPY`. | Nạp đủ 99,441 orders, 112,650 order items, không trùng lặp. | **ĐẠT** |
-| **4** | **Data Modeling (Kimball Star Schema)** | Xây dựng dbt project gồm: Staging Views (chuẩn hoá kiểu dữ liệu, đổi tên) và Marts Tables (`fct_orders`, `dim_customers`, `dim_products`). | Cấu trúc Star Schema chuẩn xác, tối ưu query phân tích. | **ĐẠT** |
+| **3** | **Data Ingestion (Data Lake -> DWH)** | Nạp 9 bảng raw qua lệnh `COPY` với IAM Role `RedshiftS3ReadOnlyRole` (STS AssumeRole). | Nạp đủ 99,441 orders, 112,650 order items; V3 nâng cấp thành `@task load_raw_from_s3` chạy `TRUNCATE + COPY` đảm bảo Idempotent. | **ĐẠT** |
+| **4** | **Data Modeling (Kimball Star Schema)** | Xây dựng dbt project gồm: Staging Views (`public_staging`) và Marts Tables (`fct_orders`, `dim_customers`, `dim_products`). | Cấu trúc Star Schema chuẩn xác, tối ưu query phân tích. | **ĐẠT** |
 | **5** | **Data Quality & Testing** | Viết dbt tests kiểm tra `unique`, `not_null`, `accepted_values`, `relationships`. | Vượt qua 9/9 tests (`PASS=9 WARN=0 ERROR=0`). | **ĐẠT** |
-| **6** | **Pipeline Orchestration (Airflow)** | Triển khai Airflow bằng Astronomer CLI trên Docker, sử dụng Astronomer Cosmos để parse dbt DAG thành native Airflow task group. | Toàn bộ DAG chạy thành công (All-Green status) trên UI. | **ĐẠT** |
-| **7** | **Data Consumption & Export** | Viết module Python (`redshift-connector` + `pandas`) trích xuất dữ liệu marts ra các file CSV sạch để phục vụ BI & Data Science. | Xuất 4 bộ dataset phân tích sạch vào `exports/` (~54 MB). | **ĐẠT** |
+| **6** | **Pipeline Orchestration (Airflow + Cosmos)** | Triển khai Airflow bằng Astro CLI trên Docker, dùng Astronomer Cosmos parse dbt DAG thành native Airflow TaskGroup. | Toàn bộ DAG chạy thành công (18/18 tasks xanh lá trên UI). | **ĐẠT** |
+| **7** | **Event-Driven Automation & FinOps (V3)** | Tự động quét `raw/*.csv` theo lịch `*/15 * * * *` (`S3KeySensor` `reschedule` + `soft_fail=True`), chỉ move sang `archive/<ts>/` sau khi dbt & test pass. | Nghiệm thu live 2 nhịp liên tiếp: nhịp `23:30:00` **18/18 success** + archive sạch 9 file sang `archive/20261112_165135/`; nhịp `23:45:00` khi `raw/` rỗng tự chuyển **17 tasks `skipped`** (\$0 Redshift). | **ĐẠT** |
+| **8** | **Data Consumption & Export** | Viết module Python (`redshift-connector` + `pandas`) trích xuất dữ liệu marts ra các file CSV sạch phục vụ BI & Data Science. | Xuất 4 bộ dataset phân tích sạch vào `exports/` (~54 MB). | **ĐẠT** |
 
 ---
 
@@ -71,7 +72,7 @@ Các file dữ liệu thành phẩm đã được trích xuất tại thư mục
 
 ### 2. Thử thách kỹ thuật lớn nhất đã vượt qua (Troubleshooting Journey)
 *Gợi ý: Trong quá trình làm, có những "con bug" nào khiến bạn nhớ nhất?*
-*(Ví dụ: Lỗi dính Cloudflare WARP chặn Port 5439 của Redshift; Lỗi Power BI bị crash khi gõ kèm port `:5439` vào ô Server; Lỗi nhân 4 lần dữ liệu khi chạy COPY nhiều lần; Lỗi môi trường Ubuntu WSL2 và phân quyền...)*
+*(Ví dụ: Lỗi dính Cloudflare WARP chặn Port 5439 của Redshift; Lỗi Power BI bị crash khi gõ kèm port `:5439` vào ô Server; Lỗi nhân 4 lần dữ liệu khi chạy COPY nhiều lần; Lỗi môi trường Ubuntu WSL2 và phân quyền; Port UI động trên Astro Runtime 3.3 hay hành vi Scheduler tự trigger...)*
 *Bạn đã học được cách debug và tư duy xử lý vấn đề như thế nào qua những lần vấp ngã đó?*
 
 > **Những khó khăn và bài học gỡ lỗi:**
@@ -84,9 +85,9 @@ Các file dữ liệu thành phẩm đã được trích xuất tại thư mục
 ### 3. Kiến thức & Kỹ năng cốt lõi bạn tâm đắc nhất
 *Gợi ý: Điều gì khiến bạn thấy mình tiến bộ rõ rệt nhất về tư duy Data Engineering?*
 - *Mô hình hoá dữ liệu (Dimensional Modeling - Kimball Star Schema) thay vì để dữ liệu thô?*
-- *Tư duy Data Lake (S3) vs Data Warehouse (Redshift Serverless)?*
+- *Tư duy Data Lake (`raw/` vs `archive/`) + Event-Driven Sensor (`S3KeySensor` + FinOps Skip) vs Data Warehouse (Redshift Serverless)?*
 - *Sức mạnh của dbt (viết SQL dưới dạng modular, version control, tự động sinh lineage & testing)?*
-- *Điều phối tự động bằng Airflow & Docker?*
+- *Điều phối tự động Idempotent bằng Airflow 3 & Docker?*
 
 > **Kiến thức tâm đắc nhất:**
 >
@@ -107,7 +108,7 @@ Các file dữ liệu thành phẩm đã được trích xuất tại thư mục
 
 ### 5. Kế hoạch phát triển tiếp theo (Next Steps & Future Improvements)
 *Gợi ý: Nếu có thêm thời gian hoặc làm dự án tiếp theo ở quy mô công ty lớn hơn, bạn sẽ bổ sung thêm những gì?*
-*(Ví dụ: Xây dựng Dashboard Power BI hoàn chỉnh trực quan hóa các chart doanh thu; Chuyển sang Data Ingestion Streaming với Apache Kafka/Kinesis; Thêm Data Quality Framework như Soda/Great Expectations; Triển khai CI/CD bằng GitHub Actions...)*
+*(Ví dụ: Xây dựng Dashboard Power BI hoàn chỉnh trực quan hóa các chart doanh thu; Chuyển sang Data Ingestion Streaming với Apache Kafka/Kinesis hoặc S3 EventBridge + SQS Deferred Trigger; Thêm Data Quality Framework như Soda/Great Expectations; Triển khai CI/CD bằng GitHub Actions...)*
 
 > **Định hướng tiếp theo:**
 >
@@ -119,6 +120,6 @@ Các file dữ liệu thành phẩm đã được trích xuất tại thư mục
 ## 📝 XÁC NHẬN ĐÓNG DỰ ÁN (SIGN-OFF)
 
 - **Đánh giá tổng thể dự án:** ⭐⭐⭐⭐⭐ (5/5)
-- **Ngày nghiệm thu:** 31 / 10 / 2026
+- **Ngày nghiệm thu:** V2: 31 / 10 / 2026  •  V3 (Event-Driven): 12 / 11 / 2026
 - **Xác nhận bởi Kỹ sư dự án:** 
   *(Ký tên hoặc điền Ao Minh Tam)*
