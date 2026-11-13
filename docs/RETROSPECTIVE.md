@@ -1,223 +1,158 @@
-# BÁO CÁO NGHIỆM THU DỰ ÁN & ĐÁNH GIÁ CÁ NHÂN (PROJECT SIGN-OFF & RETROSPECTIVE)
+# 📋 PROJECT SIGN-OFF, ACCEPTANCE REPORT & ENGINEERING RETROSPECTIVE
+
+> 🌐 **Language:** **English** | [Tiếng Việt](RETROSPECTIVE.vi.md)
 
 ---
 
-## 📌 THÔNG TIN CHUNG DỰ ÁN (PROJECT OVERVIEW)
+## 📌 PROJECT OVERVIEW
 
-| Thuộc tính | Chi tiết |
+| Attribute | Details |
 | :--- | :--- |
-| **Tên dự án** | **End-to-End Event-Driven AWS E-Commerce Data Pipeline & Kimball Star Schema Analytics (V3)** |
-| **Kỹ sư thực hiện** | Ao Minh Tam ([@AOMINHTAM](https://github.com/AOMINHTAM)) |
+| **Project Name** | **End-to-End Event-Driven AWS E-Commerce Data Pipeline & Kimball Star Schema Analytics** |
+| **Data Engineer** | Ao Minh Tam ([@AOMINHTAM](https://github.com/AOMINHTAM)) |
 | **Repository** | [github.com/AOMINHTAM/aws-data-pipeline](https://github.com/AOMINHTAM/aws-data-pipeline) |
-| **Dataset sử dụng** | Olist Brazilian E-Commerce Dataset (~120MB, ~100k đơn hàng, 9 quan hệ) |
-| **Công nghệ cốt lõi** | AWS (S3, Redshift Serverless, IAM), dbt Core, Apache Airflow 3 (Astro CLI & Astronomer Cosmos), Docker, Python (`redshift-connector`, `pandas`), WSL2 Ubuntu |
-| **Lịch sử hoàn thành** | **V2 (Baseline):** Tháng 10/2026 • **V3 (Event-Driven Automation):** Tháng 11/2026 |
-| **Trạng thái** | ✅ **HOÀN THÀNH TOÀN DIỆN (100% ACCEPTED & LIVE VERIFIED)** |
+| **Dataset** | Olist Brazilian E-Commerce Dataset (~120 MB, ~100k orders, 9 relational tables) |
+| **Core Stack** | AWS (S3, SQS, Redshift Serverless, IAM), dbt Core, Apache Airflow 3 (Astro CLI & Astronomer Cosmos), Docker, Python (`redshift-connector`, `pandas`), Ubuntu WSL2 |
+| **Milestones** | **V2 (Baseline):** Oct 2026 • **V3 (S3 Sensor):** Nov 12, 2026 • **V4 Step 1 (S3 → SQS → Airflow):** Nov 13, 2026 |
+| **Status** | ✅ **100% ACCEPTED & LIVE VERIFIED** |
 
 ---
 
-## 🏗️ KIẾN TRÚC HỆ THỐNG ĐÃ XÂY DỰNG (V3 EVENT-DRIVEN)
+## 🏗️ SYSTEM ARCHITECTURE EVOLUTION (V2 → V3 → V4)
 
 ```mermaid
 flowchart LR
-    A["Raw Data (CSV)\n(9 datasets)"] -->|"scripts/upload_to_s3.sh\n(aws s3 sync)"| B["Amazon S3 Landing\n(s3://.../raw/)"]
-    B -->|"1. S3KeySensor (*/15)\nEmpty -> SKIP ($0 RPU)"| C["Apache Airflow 3\n(Astro CLI / Cosmos)"]
-    C -->|"2. @task load_raw_from_s3\n(TRUNCATE + COPY via IAM)"| D["Redshift Serverless (4 RPUs)\n(raw_data Bronze)"]
-    D -->|"3. dbt Staging Views\n(public_staging)"| E["dbt Marts Tables\n(public_marts Star Schema\n& 9/9 Quality Tests)"]
-    E -->|"4. @task archive_s3_files\n(Move raw/ -> archive/<ts>/)"| F["Amazon S3 Archive\n(Zero Duplicates)"]
-    E -->|"Python Export\n(redshift-connector)"| G["BI Consumption\n(Power BI / CSVs / Pandas)"]
+    A["Raw Data (CSV)\n(9 datasets)"] -->|"scripts/upload_to_s3.sh\n(aws s3 sync / cp)"| B["Amazon S3 Landing\n(s3://.../raw/)"]
+    B -->|"s3:ObjectCreated:*\n(Push < 1s)"| C["AWS SQS Queue\n(olist-s3-raw-arrival-queue)"]
+    C -->|"1. SqsSensor (*/5)\nEmpty -> SKIP ($0 RPU)"| D["Apache Airflow 3\n(Astro CLI / Cosmos)"]
+    D -->|"2. @task load_raw_from_sqs\n(TRUNCATE + COPY via IAM)"| E["Redshift Serverless (4 RPUs)\n(raw_data Bronze)"]
+    E -->|"3. dbt Staging Views\n(public_staging)"| F["dbt Marts Tables\n(public_marts Star Schema\n& 9/9 Quality Tests)"]
+    F -->|"4. @task archive_and_ack\n(Move raw/ -> archive/ & ACK SQS)"| G["Amazon S3 Archive & SQS ACK\n(At-Least-Once Delivery)"]
+    F -->|"Python Export\n(redshift-connector)"| H["BI Consumption\n(Power BI / CSVs / Pandas)"]
 ```
 
 ---
 
-## ✅ BẢNG NGHIỆM THU CÁC HẠNG MỤC KỸ THUẬT (ACCEPTANCE CHECKLIST)
+## ✅ TECHNICAL ACCEPTANCE CHECKLIST
 
-| STT | Hạng mục công việc | Tiêu chí nghiệm thu | Kết quả | Trạng thái |
+| # | Workstream | Acceptance Criteria | Result | Status |
 | :---: | :--- | :--- | :--- | :---: |
-| **1** | **Bảo mật & Môi trường Base** | Môi trường Linux Ubuntu WSL2, phân quyền IAM User tối thiểu (`least privilege`), AWS CLI v2, quản lý source code bằng Git. | Hoàn thành, bảo mật credentials + `AIRFLOW_CONN_AWS_DEFAULT` qua `.env` (git-ignored). | **ĐẠT** |
-| **2** | **Hạ tầng AWS Cloud & Chi phí** | Thiết lập S3 Bucket bảo mật private, Amazon Redshift Serverless 4 RPU, cấu hình AWS Budget Alert kiểm soát ngưỡng \$5/tháng. | Hoàn thành, không vượt chi phí dự toán. | **ĐẠT** |
-| **3** | **Data Ingestion (Data Lake -> DWH)** | Nạp 9 bảng raw qua lệnh `COPY` với IAM Role `RedshiftS3ReadOnlyRole` (STS AssumeRole). | Nạp đủ 99,441 orders, 112,650 order items; V3 nâng cấp thành `@task load_raw_from_s3` chạy `TRUNCATE + COPY` đảm bảo Idempotent. | **ĐẠT** |
-| **4** | **Data Modeling (Kimball Star Schema)** | Xây dựng dbt project gồm: Staging Views (`public_staging`) và Marts Tables (`fct_orders`, `dim_customers`, `dim_products`). | Cấu trúc Star Schema chuẩn xác, tối ưu query phân tích. | **ĐẠT** |
-| **5** | **Data Quality & Testing** | Viết dbt tests kiểm tra `unique`, `not_null`, `accepted_values`, `relationships`. | Vượt qua 9/9 tests (`PASS=9 WARN=0 ERROR=0`). | **ĐẠT** |
-| **6** | **Pipeline Orchestration (Airflow + Cosmos)** | Triển khai Airflow bằng Astro CLI trên Docker, dùng Astronomer Cosmos parse dbt DAG thành native Airflow TaskGroup. | Toàn bộ DAG chạy thành công (18/18 tasks xanh lá trên UI). | **ĐẠT** |
-| **7** | **Event-Driven Automation & FinOps (V3)** | Tự động quét `raw/*.csv` theo lịch `*/15 * * * *` (`S3KeySensor` `reschedule` + `soft_fail=True`), chỉ move sang `archive/<ts>/` sau khi dbt & test pass. | Nghiệm thu live 2 nhịp liên tiếp: nhịp `23:30:00` **18/18 success** + archive sạch 9 file sang `archive/20261112_165135/`; nhịp `23:45:00` khi `raw/` rỗng tự chuyển **17 tasks `skipped`** (\$0 Redshift). | **ĐẠT** |
-| **8** | **Data Consumption & Export** | Viết module Python (`redshift-connector` + `pandas`) trích xuất dữ liệu marts ra các file CSV sạch phục vụ BI & Data Science. | Xuất 4 bộ dataset phân tích sạch vào `exports/` (~54 MB). | **ĐẠT** |
+| **1** | **Security & Base Environment** | Ubuntu WSL2 environment, least-privilege IAM user, AWS CLI v2, Git version control. | Completed; credentials + `AIRFLOW_CONN_AWS_DEFAULT` secured via `.env` (git-ignored). | **PASS** |
+| **2** | **AWS Cloud Infra & FinOps** | Private S3 bucket, Redshift Serverless (4 RPUs), AWS Budget Alert configured at \$5/month. | Completed; zero unexpected AWS billing. | **PASS** |
+| **3** | **Data Ingestion (Lake → DWH)** | Load 9 raw tables via `COPY` using `RedshiftS3ReadOnlyRole` (STS AssumeRole). | Loaded 99,441 orders & 112,650 order items; automated with idempotent `TRUNCATE + COPY`. | **PASS** |
+| **4** | **Data Modeling (Kimball Star Schema)** | Build dbt project: Staging Views (`public_staging`) and Marts Tables (`fct_orders`, `dim_customers`, `dim_products`). | Clean Star Schema optimized for analytical BI queries. | **PASS** |
+| **5** | **Data Quality & Testing** | Implement dbt tests for `unique`, `not_null`, `accepted_values`, `relationships`. | Passed 9/9 tests (`PASS=9 WARN=0 ERROR=0`). | **PASS** |
+| **6** | **Pipeline Orchestration (Airflow + Cosmos)** | Deploy Airflow 3 via Astro CLI on Docker; map dbt DAG natively using Astronomer Cosmos `DbtTaskGroup`. | Full DAG executed cleanly (18/18 green tasks in UI). | **PASS** |
+| **7** | **Event-Driven Automation (V3 → V4)** | Evolve from V3 polling (`S3KeySensor`) to V4 push-based (`S3 Event` → `SQS` → `SqsSensor` with `soft_fail=True` & atomic SQS ACK). | Live-verified across consecutive runs: happy path processed event + archived S3 + ACKed SQS; empty queue auto-skipped (**\$0 Redshift RPU**). | **PASS** |
+| **8** | **Data Consumption & Export** | Python export module (`redshift-connector` + `pandas`) extracting marts to clean local CSVs for Power BI. | Exported 4 clean analytical datasets into `exports/` (~54 MB). | **PASS** |
 
 ---
 
-## 📊 KẾT QUẢ ĐẦU RA DỮ LIỆU ĐÃ NGHIỆM THU
+## 📊 VERIFIED OUTPUT DATASETS
 
-Các file dữ liệu thành phẩm đã được trích xuất tại thư mục [`exports/`](../exports/) (git-ignored trên local):
+Extracted analytical datasets stored locally in [`exports/`](../exports/) (git-ignored):
 
-1. **`1_master_orders_analytics.csv`** (24.5 MB | 99,441 dòng): Tổng hợp đơn hàng, khách hàng, doanh thu, thời gian giao hàng, độ trễ và review score.
-2. **`2_dim_products.csv`** (3.2 MB | 32,951 dòng): Danh mục sản phẩm đã dịch chuẩn tiếng Anh, kích thước và khối lượng.
-3. **`3_dim_customers.csv`** (15.2 MB | 99,441 dòng): Khách hàng, phân khúc One-time vs Returning, Customer Lifetime Value (LTV).
-4. **`4_order_items_product_sales.csv`** (11.3 MB | 112,650 dòng): Chi tiết từng item bán ra kết nối với sản phẩm.
-
----
-
-## 🛠️ BÀI HỌC KỸ THUẬT & QUÁ TRÌNH GỠ LỖI (TROUBLESHOOTING & RETROSPECTIVE)
-
-### 1. Những thử thách kỹ thuật thực tế đã giải quyết (Troubleshooting Journey)
-* **Mạng & Kết nối Redshift Serverless (Port `5439`):** Xử lý tình huống Cloudflare WARP chặn kết nối SSL trực tiếp từ máy local/Docker tới Redshift endpoint, và khắc phục lỗi Power BI bị crash khi nhập kèm `:5439` vào trường Server.
-* **Đảm bảo tính Idempotent khi nạp dữ liệu (Chống trùng lặp):** Gỡ lỗi nhân 4 số dòng khi chạy `COPY` nhiều lần bằng cách chuẩn hóa quy trình `TRUNCATE TABLE` + `COPY` nguyên tử cho từng bảng, kết hợp di chuyển file khỏi `raw/` sang `archive/<timestamp>/`.
-* **Môi trường Ubuntu WSL2, Docker & Astro Runtime 3.3:** Thiết lập phân quyền chuẩn trên WSL2, cấu hình secret qua `.env` (git-ignored) cho Airflow Connection `AIRFLOW_CONN_AWS_DEFAULT=aws://`, và làm chủ hành vi Scheduler / Port động của Astro CLI.
-* **Event-Driven SQS Edge-Cases (V4):** Xử lý chuẩn xác gói tin `s3:TestEvent` (không chứa key `Records`) khi S3 mới bật Notification, tránh `KeyError`, đồng thời cấu hình `delete_message_on_reception=False` trên `SqsSensor` để bảo toàn message khi Redshift/dbt chưa pass.
-
-### 2. Kiến thức cốt lõi đúc kết (Key Engineering Takeaways)
-* **Dimensional Modeling (Kimball Star Schema):** Tổ chức tầng Bronze (`raw_data`) → Silver (`public_staging` views) → Gold (`public_marts` Fact/Dim tables) cùng 9 dbt tests kiểm soát chất lượng dữ liệu tự động.
-* **Kiến trúc Pull vs. Push Event-Driven:** Chuyển dịch hoàn toàn từ Polling định kỳ sang Push-based (`S3 ObjectCreated` → `AWS SQS` → `Airflow SqsSensor`), tách rời Storage khỏi Compute qua `VisibilityTimeout` và cơ chế `At-Least-Once Delivery`.
-* **Tư duy FinOps trên Cloud:** Tối ưu chi phí Redshift Serverless 4 RPUs bằng cơ chế `soft_fail=True` (skip sạch toàn bộ compute với \$0 RPU khi hàng đợi SQS rỗng) và tách lớp BI offline qua CSV export.
+1. **`1_master_orders_analytics.csv`** (24.5 MB | 99,441 rows): Consolidated order facts, customer attributes, revenue, delivery lead time, SLA delay flags, and review scores.
+2. **`2_dim_products.csv`** (3.2 MB | 32,951 rows): Product catalog with English category translations, dimensions, and weight.
+3. **`3_dim_customers.csv`** (15.2 MB | 99,441 rows): Customer dimension featuring `One-time` vs. `Returning` segmentation and Customer Lifetime Value (LTV).
+4. **`4_order_items_product_sales.csv`** (11.3 MB | 112,650 rows): Line-item level sales details joined with product attributes.
 
 ---
 
-## 📝 XÁC NHẬN ĐÓNG DỰ ÁN V2, V3 & V4 BƯỚC 1 (SIGN-OFF)
+## 🛠️ TROUBLESHOOTING JOURNEY & ENGINEERING RETROSPECTIVE
 
-- **Đánh giá tổng thể dự án:** ⭐⭐⭐⭐⭐ (5/5)
-- **Ngày nghiệm thu:** V2: 31/10/2026 • V3 (S3 Sensor): 12/11/2026 • V4 Step 1 (S3 → SQS → Airflow): 13/11/2026
-- **Kỹ sư thực hiện:** Ao Minh Tam ([@AOMINHTAM](https://github.com/AOMINHTAM))
+### 1. Real-World Technical Challenges Solved
+* **Network & Redshift Serverless Connectivity (Port `5439`):** Diagnosed and resolved Cloudflare WARP blocking direct SSL connections from local/Docker containers to Redshift Serverless, as well as a Power BI connector crash triggered when appending `:5439` directly in the Server input field.
+* **Idempotent Ingestion (Preventing Row Duplication):** Fixed 4x row duplication caused by repeated `COPY` runs by standardizing an atomic per-table `TRUNCATE TABLE` + `COPY` workflow coupled with lifecycle movement (`raw/` → `archive/<timestamp>/`).
+* **Ubuntu WSL2, Docker & Astro Runtime 3.3:** Configured WSL2 filesystem permissions, isolated secrets in `.env` (`AIRFLOW_CONN_AWS_DEFAULT=aws://`), and mastered Astro CLI dynamic UI ports and scheduler behaviors.
+* **SQS Event-Driven Edge Cases (V4):** Handled `s3:TestEvent` payloads (which lack the `Records` key when S3 notifications are first enabled) to prevent `KeyError`, and set `delete_message_on_reception=False` on `SqsSensor` so messages remain protected by `VisibilityTimeout` until dbt tests pass.
 
----
-
-## 🚀 LỘ TRÌNH NÂNG CẤP V4 & BÀN GIAO CONTEXT SANG CONVERSATION MỚI (V4 ROADMAP & HANDOFF)
-
-> **Mục đích tài liệu này:** Ghi lại đầy đủ trạng thái hạ tầng hiện tại, lý do kiến trúc, cơ chế hoạt động bên dưới (under-the-hood) và giá trị kiến thức của 3 bước nâng cấp V4 để khi mở Conversation mới chỉ cần đọc file này là tiếp tục triển khai ngay không mất ngữ cảnh.
-
-### 0. Trạng thái Bàn giao Hiện tại (Current Workspace & Cloud State)
-* **Git Branch đang đứng:** `feat/v4-sqs-event-driven` (tách ra từ `main` tại commit `ffcdac2` sau khi đã hoàn tất và push V3).
-* **Tài khoản & Quyền AWS IAM:**
-  * IAM User: `arn:aws:iam::205506434601:user/de-ecommerce-dev` (Region: `us-east-1`).
-  * Đã gắn đủ 4 Managed Policies: `AmazonS3FullAccess`, `AmazonRedshiftFullAccess`, `IAMFullAccess`, và **`AmazonSQSFullAccess`** (vừa cấp thêm và đã verify `wsl aws sqs list-queues --region us-east-1` thành công).
-* **Trạng thái S3 (`olist-raw-data-amt-us-east-1-205506434601-us-east-1-an`):**
-  * Folder `raw/` hiện đang trống (`[]`).
-  * 9 file CSV gốc đang nằm trong `archive/20261112_165135/` (có thể copy ngược 1 hoặc vài file từ `archive/` về `raw/` trên S3 để test V4 mà không cần upload lại từ máy local).
-  * S3 Event Notification hiện đang trống (chưa cấu hình).
-* **Trạng thái Docker / Astro CLI:**
-  * Đang tắt (`astro dev stop`) để tiết kiệm RAM.
-  * File `.env` (git-ignored) đã cấu hình sẵn `DBT_REDSHIFT_PASSWORD`, `AWS_DEFAULT_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `S3_BUCKET_NAME`, `AIRFLOW_CONN_AWS_DEFAULT=aws://`.
+### 2. Core Engineering Takeaways
+* **Dimensional Modeling (Kimball Star Schema):** Structured a 3-layer Medallion architecture (`raw_data` Bronze → `public_staging` Silver views → `public_marts` Gold physical tables) guarded by 9 automated dbt quality tests.
+* **Pull vs. Push Event-Driven Architecture:** Transitioned from periodic bucket scanning (`S3KeySensor`) to instant push-based notifications (`S3 ObjectCreated` → `AWS SQS` → `Airflow SqsSensor`), decoupling storage from compute via `VisibilityTimeout` and `At-Least-Once Delivery`.
+* **Cloud FinOps Mindset:** Minimized Redshift Serverless (4 RPUs) cost using `soft_fail=True` (zero compute wake-up on empty queue polls) and decoupled offline BI exports.
 
 ---
 
-### Tại sao lại đi theo thứ tự: Bước 1 (SQS Push) → Bước 2 (dbt Incremental) → Bước 3 (Alerting)?
-Ba bước này có **quan hệ nhân quả chặt chẽ về mặt kiến trúc**:
-1. **Bước 1 (S3 → SQS → Airflow)** giải quyết bài toán **"Khi nào chạy và độ trễ bao lâu?"** — chuyển từ *Polling định kỳ 15 phút* sang *Push-based Event-Driven* (file vừa chạm S3 là bắn event vào hàng đợi SQS để xử lý ngay).
-2. **Bước 2 (dbt Incremental Modeling)** giải quyết bài toán **"Khi event nổ liên tục theo từng lô nhỏ (micro-batch), xử lý dữ liệu thế nào để không mất dữ liệu cũ và không đốt tiền Redshift?"** — khi đã chạy theo sự kiện thực tế, ta không thể `TRUNCATE` toàn bảng raw hay `CREATE TABLE AS` dựng lại toàn bộ bảng Fact hàng triệu dòng mỗi lần có 1 file mới được nữa, mà bắt buộc phải dùng cơ chế **Incremental (Upsert / Merge)**.
-3. **Bước 3 (Webhook Alerting)** là lớp giám sát ngoại vi (Observability) — không bắt buộc cho pet project nhưng làm thử một kịch bản gọn nhẹ ở cuối để nắm trọn vẹn luồng báo động tự động khi pipeline thành công/thất bại.
+## 📝 PROJECT SIGN-OFF (V2, V3 & V4 STEP 1)
+
+- **Overall Assessment:** ⭐⭐⭐⭐⭐ (5/5)
+- **Sign-Off Dates:** V2: Oct 31, 2026 • V3 (S3 Sensor): Nov 12, 2026 • V4 Step 1 (S3 → SQS → Airflow): Nov 13, 2026
+- **Project Engineer:** Ao Minh Tam ([@AOMINHTAM](https://github.com/AOMINHTAM))
 
 ---
 
-### BƯỚC 1: Pure Event-Driven Ingestion với AWS S3 Event Notification & AWS SQS
+## 🚀 V4 UPGRADE ROADMAP & TECHNICAL DEEP DIVE
+
+### Why Sequence V4 as: Step 1 (SQS Push) → Step 2 (dbt Incremental) → Step 3 (Alerting)?
+These three steps follow a **strict architectural causality chain**:
+1. **Step 1 (S3 → SQS → Airflow)** solves **"When to run and with what latency?"** — moving from 15-minute polling to push-based event queuing.
+2. **Step 2 (dbt Incremental Modeling)** solves **"How do we process continuous micro-batch events without wiping historical data or burning Redshift credits?"** — once triggered by individual file arrivals, full `TRUNCATE` / `CREATE TABLE AS` rebuilds become inefficient, requiring **Incremental Upsert / Merge**.
+3. **Step 3 (Webhook Alerting)** adds lightweight external observability for automated `SUCCESS` / `FAILED` notifications.
+
+---
+
+### STEP 1: Pure Event-Driven Ingestion with AWS S3 Event Notification & AWS SQS (`✅ COMPLETED`)
 
 ```mermaid
 flowchart LR
-    A["Upload CSV vào\ns3://.../raw/"] -->|"s3:ObjectCreated:*\n(Push tức thì)"| B["S3 Event Notification"]
+    A["Upload CSV to\ns3://.../raw/"] -->|"s3:ObjectCreated:*\n(Instant Push)"| B["S3 Event Notification"]
     B -->|"IAM Queue Policy\n(sqs:SendMessage)"| C["AWS SQS Queue\n(olist-s3-raw-arrival-queue)"]
-    C -->|"SqsSensor / SqsHook\n(Đọc JSON & lấy tên file)"| D["Airflow DAG V4\n(load -> dbt -> archive -> xóa msg)"]
+    C -->|"SqsSensor / SqsHook\n(Parse JSON & Extract Key)"| D["Airflow DAG V4\n(load -> dbt -> archive -> ACK msg)"]
 ```
 
-#### 1. Cái gì chuẩn bị làm (What to build)
-1. Tạo Standard Queue trên AWS SQS: `olist-s3-raw-arrival-queue` (Region `us-east-1`, chi phí \$0 vì Free Tier miễn phí 1 triệu requests/tháng).
-2. Gắn **Resource-based Queue Policy** cho phép dịch vụ `s3.amazonaws.com` thực hiện quyền `sqs:SendMessage` từ đúng ARN của bucket `olist-raw-data-amt-us-east-1-205506434601-us-east-1-an`.
-3. Bật **S3 Bucket Notification Configuration**: Lắng nghe sự kiện `s3:ObjectCreated:*` với bộ lọc `prefix = raw/` và `suffix = .csv` để đẩy message thẳng vào SQS.
-4. Nâng cấp `dags/ecommerce_pipeline_dag.py`: Dùng `SqsSensor` (hoặc `@task` với `SqsHook`) lắng nghe queue, bóc tách chính xác danh sách `bucket_key` từ JSON payload của SQS, nạp vào Redshift, chạy dbt, archive file và xóa message khỏi queue.
+#### 1. What Was Built
+1. Created Standard SQS Queue: `olist-s3-raw-arrival-queue` (`us-east-1`, \$0 within AWS Free Tier of 1M requests/month).
+2. Attached a **Resource-based Queue Policy** granting `s3.amazonaws.com` `sqs:SendMessage` permission restricted by `aws:SourceArn` (`arn:aws:s3:::olist-raw-data-amt-us-east-1-205506434601-us-east-1-an`) and `aws:SourceAccount`.
+3. Enabled **S3 Bucket Notification Configuration** listening to `s3:ObjectCreated:*` filtered by `prefix = raw/` and `suffix = .csv`.
+4. Upgraded [`dags/ecommerce_pipeline_dag.py`](../dags/ecommerce_pipeline_dag.py) and added modular [`include/sqs_parser.py`](../include/sqs_parser.py) + [`tests/test_sqs_parser.py`](../tests/test_sqs_parser.py) (6/6 unit tests passing).
 
-#### 2. Mục đích — Vì sao phải làm (Why)
-* **Loại bỏ độ trễ Polling (Zero Polling Latency):** Ở V3 (`S3KeySensor` chạy mỗi 15 phút), nếu file lên S3 lúc `12:01` thì phải đợi tới `12:15` mới được xử lý. Với S3 → SQS, sự kiện được đẩy đi ngay lập tức (dưới 1–2 giây).
-* **Không cần quét (List) toàn bộ S3:** Lệnh `LIST` trên S3 khi bucket có hàng trăm ngàn object rất chậm và tốn phí API. Trong khi đó, message trong SQS chứa sẵn tên file vừa tạo (`Records[0].s3.object.key`), Airflow biết chính xác cần nạp file nào mà không cần quét thư mục.
-* **Chống mất mát sự kiện (Buffering & Decoupling):** Nếu Airflow container đang bảo trì hoặc tắt, các sự kiện upload file lên S3 vẫn nằm an toàn trong hàng đợi SQS (lưu giữ tới 4–14 ngày). Khi Airflow bật lại, nó đọc hàng đợi và xử lý bù không sót một file nào!
-
-#### 3. Cơ chế hoạt động bên dưới (Under-the-hood Mechanism)
-* **JSON Event Payload:** Khi có file `raw/olist_orders_dataset.csv` được upload, S3 sinh ra một gói JSON chuẩn và đẩy vào SQS:
-  ```json
-  {
-    "Records": [
-      {
-        "eventName": "ObjectCreated:Put",
-        "s3": {
-          "bucket": { "name": "olist-raw-data-amt-..." },
-          "object": { "key": "raw/olist_orders_dataset.csv", "size": 17654914 }
-        }
-      }
-    ]
-  }
-  ```
+#### 2. Under-the-Hood Mechanism
+* **Zero Polling Latency & Zero S3 `LIST` Overhead:** S3 emits event metadata (`Records[0].s3.object.key`) within 1–2 seconds directly into SQS, eliminating expensive bucket listing scans.
 * **Visibility Timeout & At-Least-Once Delivery:**
-  * Khi Airflow đọc một message từ SQS (`ReceiveMessage`), message đó **chưa bị xóa ngay** mà chỉ tạm thời "tàng hình" với các worker khác trong khoảng thời gian `VisibilityTimeout` (ví dụ 300 giây).
-  * Nếu Airflow nạp Redshift + chạy dbt **thành công**, Airflow dùng `ReceiptHandle` gọi `DeleteMessage` để xóa hẳn message khỏi SQS.
-  * Nếu giữa chừng Redshift bị lỗi mạng khiến task **thất bại**, Airflow không xóa message → hết 300 giây, message tự động hiện lại trong SQS để lượt chạy sau xử lý lại. Đây chính là cơ chế đảm bảo **không bao giờ mất dữ liệu (Fault-Tolerant Message Queue)**.
+  * `SqsSensor` sets `delete_message_on_reception=False` with `VisibilityTimeout=300s`.
+  * Messages are deleted (`delete_message` via `ReceiptHandle`) **only after** Redshift COPY, dbt models, 9/9 tests, and S3 archiving all succeed.
+  * If any step fails mid-run, the message automatically becomes visible again after 300 seconds for fault-tolerant retry.
 
-#### 4. Học được gì từ Bước 1 (Engineering Takeaways)
-* Phân biệt sâu sắc hai mô hình kiến trúc kinh điển: **Pull/Polling (`S3KeySensor`)** vs. **Push/Event-Driven (`S3 Event -> SQS`)**.
-* Hiểu cách hai dịch vụ AWS giao tiếp bảo mật với nhau qua **Resource-based Policy** (khác với Identity-based Policy của IAM User).
-* Nắm vững cơ chế hàng đợi phân tán (**Message Queue**): `VisibilityTimeout`, `ReceiptHandle`, `Idempotent Consumer`, và cách **tách rời (Decouple)** tầng Storage (S3) khỏi tầng Compute/Orchestration (Airflow).
-
-#### 5. Kết quả Nghiệm thu Live Bước 1 (Live Verified & Accepted)
+#### 3. Step 1 Live Verification Results
 > [!NOTE]
-> **Trạng thái:** ✅ **ĐẠT 100% (LIVE VERIFIED TRÊN AWS & AIRFLOW 3)**
-> - **Cấu hình AWS:** Đã tạo SQS queue `olist-s3-raw-arrival-queue`, gắn SQS Access Policy cấp quyền cho S3, và bật S3 Bucket Notification trên prefix `raw/` và suffix `.csv`.
-> - **Airflow V4:** Nâng cấp [`dags/ecommerce_pipeline_dag.py`](../dags/ecommerce_pipeline_dag.py) dùng `SqsSensor` (timeout 45s, `soft_fail=True`, `delete_message_on_reception=False`) kết hợp module [`include/sqs_parser.py`](../include/sqs_parser.py).
-> - **Kiểm thử thực tế 2 nhịp liên tiếp:**
->   - **Nhịp 1 (`14:20:00` - Happy Path):** SQS nhận event `product_category_name_translation.csv` → Airflow tự động nạp Redshift → chạy dbt 9/9 tests PASS → archive S3 → gọi `✉️ SQS ACK` xóa message khỏi queue.
->   - **Nhịp 2 (`14:25:00` - FinOps Zero-Cost):** SQS rỗng → `SqsSensor` timeout sau 45s chuyển toàn bộ task sang **màu hồng (`SKIPPED`)**, bảo toàn ngân sách \$0 Redshift RPU.
-> - **Bằng chứng hình ảnh nghiệm thu:**
->   - Graph View V4: [`images/airflow_v4_dag_graph.png`](../images/airflow_v4_dag_graph.png)
->   - Grid View Event-Driven & FinOps: [`images/airflow_v4_grid_event_driven.png`](../images/airflow_v4_grid_event_driven.png)
->   - SQS ACK & S3 Archive Task Logs: [`images/airflow_v4_sqs_ack_log.png`](../images/airflow_v4_sqs_ack_log.png)
-
+> **Status:** ✅ **100% PASS (LIVE VERIFIED ON AWS & AIRFLOW 3)**
+> - **Run `14:20:00` (Happy Path):** SQS delivered `product_category_name_translation.csv` event → Airflow refreshed Redshift → dbt passed 9/9 tests → archived CSV to `archive/20261113_072547/` → executed `✉️ SQS ACK` to delete the queue message.
+> - **Run `14:25:00` (FinOps Zero-Cost):** Empty SQS queue timed out cleanly at 45s (`soft_fail=True`) and transitioned downstream tasks to **`SKIPPED`** (\$0 Redshift RPU).
+> - **Live Evidence Screenshots:**
+>   - V4 DAG Graph: [`images/airflow_v4_dag_graph.png`](../images/airflow_v4_dag_graph.png)
+>   - Grid View (Event Run vs. FinOps Skip): [`images/airflow_v4_grid_event_driven.png`](../images/airflow_v4_grid_event_driven.png)
+>   - SQS ACK & S3 Archival Execution Logs: [`images/airflow_v4_sqs_ack_log.png`](../images/airflow_v4_sqs_ack_log.png)
 
 ---
 
-### BƯỚC 2: dbt Incremental Modeling (`materialized='incremental'` & Upsert/Merge)
+### STEP 2: dbt Incremental Modeling (`materialized='incremental'` & Upsert/Merge) — `🗓️ NEXT`
 
-#### 1. Cái gì chuẩn bị làm (What to build)
-1. Thay đổi cơ chế nạp dữ liệu và cấu hình các model lớn trong `dbt/models/marts/` (đặc biệt là `fct_orders.sql` và `dim_customers.sql`) từ `materialized='table'` sang **`materialized='incremental'`** với `unique_key='order_id'` (hoặc chiến lược `merge` / `delete+insert` trên Redshift).
-2. Bổ sung khối logic jinja `{% if is_incremental() %}` trong câu SQL của dbt để chỉ lọc các bản ghi mới hoặc vừa được cập nhật.
-3. Kiểm thử thực tế: Chạy lần 1 (Full Load) → Nạp thêm một batch đơn hàng mới/cập nhật trạng thái đơn cũ → Chạy lần 2 (Incremental Load) và kiểm tra SQL mà dbt sinh ra trong log của Redshift.
+#### 1. What to Build
+1. Refactor large mart models in `dbt/models/marts/` (especially `fct_orders.sql` and `dim_customers.sql`) from `materialized='table'` to **`materialized='incremental'`** with `unique_key='order_id'` (`delete+insert` / `merge` strategy on Redshift).
+2. Add Jinja `{% if is_incremental() %}` high-water mark filters to process only newly arrived or updated records.
+3. Validate in Redshift: Execute Full Load → ingest a delta batch of new/updated orders → execute Incremental Load and inspect generated Redshift DML transactions.
 
-#### 2. Mục đích — Vì sao phải làm (Why)
-* **Giải bài toán Chi phí & Hiệu năng ở quy mô lớn (Scale):** Với `materialized='table'`, mỗi lần chạy dbt sẽ thực hiện `DROP TABLE` và `CREATE TABLE AS SELECT ...` quét lại toàn bộ 100% lịch sử. Nếu bảng có 100 triệu đơn hàng mà mỗi 5 phút chỉ có thêm 500 đơn mới, việc dựng lại cả bảng 100 triệu dòng là sự lãng phí tài nguyên không thể chấp nhận trong thực tế.
-* **Bảo toàn dữ liệu lịch sử khi nạp theo từng lô nhỏ (Micro-batch):** Khi kết hợp với SQS ở Bước 1, mỗi lần chỉ có một vài file/lô dữ liệu mới đi vào. Cơ chế Incremental giúp **cộng dồn và cập nhật (Upsert)** vào bảng đích thay vì xóa trắng dữ liệu cũ.
+#### 2. Under-the-Hood Mechanism
+* **Initial Run (`is_incremental() == False`):** Executes full `CREATE TABLE public_marts.fct_orders AS SELECT ...`.
+* **Subsequent Runs (`is_incremental() == True`):** Applies a **High-Water Mark** lookback filter:
+  ```sql
+  {% if is_incremental() %}
+    WHERE order_purchase_timestamp >= (SELECT MAX(order_purchase_timestamp) FROM {{ this }})
+  {% endif %}
+  ```
+* **Atomic Upsert (`delete+insert`) on Redshift:** Stage delta records into a temporary table (`fct_orders__dbt_tmp`), then atomically `DELETE` matching `unique_key` rows and `INSERT` updated records in a single transaction to prevent duplicates on order status updates.
 
-#### 3. Cơ chế hoạt động bên dưới (Under-the-hood Mechanism)
-* **Lần chạy đầu tiên (khi bảng đích chưa tồn tại hoặc chạy `--full-refresh`):**
-  * Hàm `is_incremental()` trả về `False`.
-  * dbt bỏ qua điều kiện `WHERE` và chạy `CREATE TABLE public_marts.fct_orders AS SELECT ...` nạp toàn bộ lịch sử.
-* **Các lần chạy tiếp theo (khi bảng `public_marts.fct_orders` đã tồn tại):**
-  * Hàm `is_incremental()` trả về `True`.
-  * dbt kích hoạt bộ lọc **High-Water Mark (Cột mốc thời gian lớn nhất)**:
-    ```sql
-    {% if is_incremental() %}
-      WHERE order_purchase_timestamp >= (SELECT MAX(order_purchase_timestamp) FROM {{ this }})
-    {% endif %}
-    ```
-    *(Biến `{{ this }}` chính là tên bảng đích `public_marts.fct_orders` hiện tại trong Redshift).*
-* **Cơ chế Upsert (`delete+insert` / `merge`) trên Redshift:**
-  * Để tránh bị nhân đôi dòng (duplicate) khi một đơn hàng cũ thay đổi trạng thái (ví dụ từ `shipped` sang `delivered`), dbt tạo một bảng tạm (`fct_orders__dbt_tmp`) chỉ chứa các dòng mới/thay đổi.
-  * Sau đó trong **1 Transaction nguyên tử (Atomic Transaction)**, Redshift thực hiện:
-    1. `DELETE FROM public_marts.fct_orders WHERE order_id IN (SELECT order_id FROM fct_orders__dbt_tmp);` (Xóa bản ghi cũ của những đơn vừa cập nhật).
-    2. `INSERT INTO public_marts.fct_orders SELECT * FROM fct_orders__dbt_tmp;` (Chèn bản ghi mới nhất vào).
-
-#### 4. Học được gì từ Bước 2 (Engineering Takeaways)
-* Nắm vững kỹ thuật **Incremental Data Modeling** — câu hỏi phỏng vấn bắt buộc ở mọi vị trí Data Engineer / Analytics Engineer.
-* Hiểu rõ khái niệm **High-Water Mark**, cách xử lý **Late-Arriving Data** (dữ liệu đến muộn bằng khoảng lùi thời gian `lookback window`), và sự khác biệt giữa **Append-only** vs. **Upsert (`unique_key`)**.
-* Đọc hiểu được mã DDL/DML thực tế mà `dbt-redshift` biên dịch ra phía sau lớp macro Jinja.
+#### 3. Engineering Takeaways
+* Mastery of **Incremental Data Modeling**, **High-Water Marks**, **Late-Arriving Data** (lookback windows), and **Append-only** vs. **Upsert (`unique_key`)** patterns.
 
 ---
 
-### BƯỚC 3: Lightweight Observability & Webhook Alerting (Trải nghiệm Cơ chế Giám sát)
+### STEP 3: Lightweight Observability & Webhook Alerting — `🗓️ PLANNED`
 
-#### 1. Cái gì chuẩn bị làm (What to build)
-* Viết một hàm callback gọn nhẹ trong Python (`send_pipeline_notification(context)`) gắn vào `on_success_callback` / `on_failure_callback` của DAG Airflow.
-* Bắn thông báo định dạng Markdown qua **Telegram Bot API** hoặc **Slack/Discord Incoming Webhook** (chỉ dùng thư viện chuẩn `urllib`/`requests` gọi HTTP POST).
+#### 1. What to Build
+* Implement a Python callback (`send_pipeline_notification(context)`) attached to Airflow DAG `on_success_callback` / `on_failure_callback`.
+* Dispatch formatted Markdown alerts to **Telegram Bot API** or **Slack/Discord Incoming Webhooks** using standard HTTP POST requests.
 
-#### 2. Mục đích — Vì sao phải làm (Why)
-* Trong môi trường thực tế, kỹ sư không bao giờ ngồi canh màn hình Airflow 24/7. Hệ thống phải tự động báo tin khi có sự cố (`Task Failed` / `dbt Test Failed`) hoặc gửi báo cáo tóm tắt sau mỗi batch nạp thành công.
-
-#### 3. Cơ chế hoạt động bên dưới (Under-the-hood Mechanism)
-* **Airflow Execution Context (`context` dictionary):** Khi bất kỳ task hoặc DAG nào kết thúc, Airflow tự động truyền một biến `context` chứa toàn bộ metadata của lượt chạy (`dag_run`, `task_instance`, `logical_date`, `exception`, `ti.xcom_pull(...)`).
-* Hàm callback trích xuất các thông số này (ví dụ: đã nạp bao nhiêu file từ XCom, tốn bao nhiêu giây, link log ở đâu) và đóng gói thành HTTP POST payload gửi tới Webhook URL.
-
-#### 4. Học được gì từ Bước 3 (Engineering Takeaways)
-* Hiểu cơ chế **Event Hook / Callback Lifecycle** bên trong Airflow State Machine (khi một Task chuyển trạng thái sang `SUCCESS` hoặc `FAILED`).
-* Biết cách lấy dữ liệu xuyên task qua `xcom_pull` để tạo thông báo giàu ngữ cảnh (Rich Context Alerting) thay vì chỉ báo lỗi chung chung.
-
+#### 2. Under-the-Hood Mechanism
+* Leverages Airflow's **Execution Context (`context`)** dictionary and `xcom_pull` to extract batch metrics (loaded files, execution duration, exception traces, and log links) for rich, actionable incident alerting.

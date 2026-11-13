@@ -126,7 +126,8 @@ aws_data_pipeline/
 ├── include/
 │   └── sqs_parser.py               # Modular SQS S3 Event JSON parser & deduplicator
 ├── docs/
-│   └── RETROSPECTIVE.md            # Engineering retrospective, troubleshooting journey & V4 roadmap
+│   ├── RETROSPECTIVE.md            # Engineering retrospective, troubleshooting journey & V4 roadmap (EN)
+│   └── RETROSPECTIVE.vi.md         # Engineering retrospective, troubleshooting journey & V4 roadmap (VI)
 ├── tests/
 │   ├── dags/
 │   │   └── test_dag_example.py     # Pytest DAG validation (imports, tags, retries >= 2)
@@ -231,4 +232,4 @@ make export-data
 * **Minh Tam Ao** - [GitHub](https://github.com/AOMINHTAM)
 * Project: *AWS E-Commerce Data Pipeline V4 (Pure Event-Driven ELT with S3, SQS & Airflow)*
 
-> 📖 *For technical challenges, troubleshooting journey, acceptance checklist, and V4 roadmap, see [Project Retrospective](docs/RETROSPECTIVE.md).*
+> 📖 *For technical challenges, troubleshooting journey, acceptance checklist, and V4 roadmap, see [Project Retrospective (EN)](docs/RETROSPECTIVE.md) | [Bản Tiếng Việt](docs/RETROSPECTIVE.vi.md).*
