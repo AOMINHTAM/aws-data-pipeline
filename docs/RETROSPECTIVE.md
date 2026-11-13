@@ -47,7 +47,7 @@ flowchart LR
 
 ## 📊 KẾT QUẢ ĐẦU RA DỮ LIỆU ĐÃ NGHIỆM THU
 
-Các file dữ liệu thành phẩm đã được trích xuất tại thư mục [`exports/`](file:///d:/gehihi/aws_data_pipeline/exports/):
+Các file dữ liệu thành phẩm đã được trích xuất tại thư mục [`exports/`](../exports/) (git-ignored trên local):
 
 1. **`1_master_orders_analytics.csv`** (24.5 MB | 99,441 dòng): Tổng hợp đơn hàng, khách hàng, doanh thu, thời gian giao hàng, độ trễ và review score.
 2. **`2_dim_products.csv`** (3.2 MB | 32,951 dòng): Danh mục sản phẩm đã dịch chuẩn tiếng Anh, kích thước và khối lượng.
@@ -56,73 +56,26 @@ Các file dữ liệu thành phẩm đã được trích xuất tại thư mục
 
 ---
 
-## ✍️ PHẦN DÀNH CHO BẠN: ĐÁNH GIÁ & CẢM NHẬN CÁ NHÂN (RETROSPECTIVE)
+## 🛠️ BÀI HỌC KỸ THUẬT & QUÁ TRÌNH GỠ LỖI (TROUBLESHOOTING & RETROSPECTIVE)
 
-> *(Hãy dành 10 - 15 phút đọc các câu hỏi gợi ý bên dưới và tự do viết lại cảm nhận, bài học và suy nghĩ thật của bạn vào các khung bên dưới nhé!)*
+### 1. Những thử thách kỹ thuật thực tế đã giải quyết (Troubleshooting Journey)
+* **Mạng & Kết nối Redshift Serverless (Port `5439`):** Xử lý tình huống Cloudflare WARP chặn kết nối SSL trực tiếp từ máy local/Docker tới Redshift endpoint, và khắc phục lỗi Power BI bị crash khi nhập kèm `:5439` vào trường Server.
+* **Đảm bảo tính Idempotent khi nạp dữ liệu (Chống trùng lặp):** Gỡ lỗi nhân 4 số dòng khi chạy `COPY` nhiều lần bằng cách chuẩn hóa quy trình `TRUNCATE TABLE` + `COPY` nguyên tử cho từng bảng, kết hợp di chuyển file khỏi `raw/` sang `archive/<timestamp>/`.
+* **Môi trường Ubuntu WSL2, Docker & Astro Runtime 3.3:** Thiết lập phân quyền chuẩn trên WSL2, cấu hình secret qua `.env` (git-ignored) cho Airflow Connection `AIRFLOW_CONN_AWS_DEFAULT=aws://`, và làm chủ hành vi Scheduler / Port động của Astro CLI.
+* **Event-Driven SQS Edge-Cases (V4):** Xử lý chuẩn xác gói tin `s3:TestEvent` (không chứa key `Records`) khi S3 mới bật Notification, tránh `KeyError`, đồng thời cấu hình `delete_message_on_reception=False` trên `SqsSensor` để bảo toàn message khi Redshift/dbt chưa pass.
 
-### 1. Cảm xúc & Trải nghiệm tổng quan khi hoàn thành dự án
-*Gợi ý: Cảm giác của bạn khi nhìn thấy Airflow DAG chuyển sang màu xanh lá cây toàn bộ, dbt test 9/9 pass, và file CSV được tải thành công từ Redshift xuống máy? Dự án này có gì khác biệt so với việc chỉ học lý thuyết?*
-
-> **Cảm nhận của tôi:**
->
-> *(Viết cảm xúc và trải nghiệm của bạn tại đây...)*
-> 
-
----
-
-### 2. Thử thách kỹ thuật lớn nhất đã vượt qua (Troubleshooting Journey)
-*Gợi ý: Trong quá trình làm, có những "con bug" nào khiến bạn nhớ nhất?*
-*(Ví dụ: Lỗi dính Cloudflare WARP chặn Port 5439 của Redshift; Lỗi Power BI bị crash khi gõ kèm port `:5439` vào ô Server; Lỗi nhân 4 lần dữ liệu khi chạy COPY nhiều lần; Lỗi môi trường Ubuntu WSL2 và phân quyền; Port UI động trên Astro Runtime 3.3 hay hành vi Scheduler tự trigger...)*
-*Bạn đã học được cách debug và tư duy xử lý vấn đề như thế nào qua những lần vấp ngã đó?*
-
-> **Những khó khăn và bài học gỡ lỗi:**
->
-> *(Viết lại các lỗi nhớ đời và cách bạn đã vượt qua tại đây...)*
-> 
+### 2. Kiến thức cốt lõi đúc kết (Key Engineering Takeaways)
+* **Dimensional Modeling (Kimball Star Schema):** Tổ chức tầng Bronze (`raw_data`) → Silver (`public_staging` views) → Gold (`public_marts` Fact/Dim tables) cùng 9 dbt tests kiểm soát chất lượng dữ liệu tự động.
+* **Kiến trúc Pull vs. Push Event-Driven:** Chuyển dịch hoàn toàn từ Polling định kỳ sang Push-based (`S3 ObjectCreated` → `AWS SQS` → `Airflow SqsSensor`), tách rời Storage khỏi Compute qua `VisibilityTimeout` và cơ chế `At-Least-Once Delivery`.
+* **Tư duy FinOps trên Cloud:** Tối ưu chi phí Redshift Serverless 4 RPUs bằng cơ chế `soft_fail=True` (skip sạch toàn bộ compute với \$0 RPU khi hàng đợi SQS rỗng) và tách lớp BI offline qua CSV export.
 
 ---
 
-### 3. Kiến thức & Kỹ năng cốt lõi bạn tâm đắc nhất
-*Gợi ý: Điều gì khiến bạn thấy mình tiến bộ rõ rệt nhất về tư duy Data Engineering?*
-- *Mô hình hoá dữ liệu (Dimensional Modeling - Kimball Star Schema) thay vì để dữ liệu thô?*
-- *Tư duy Data Lake (`raw/` vs `archive/`) + Event-Driven Sensor (`S3KeySensor` + FinOps Skip) vs Data Warehouse (Redshift Serverless)?*
-- *Sức mạnh của dbt (viết SQL dưới dạng modular, version control, tự động sinh lineage & testing)?*
-- *Điều phối tự động Idempotent bằng Airflow 3 & Docker?*
-
-> **Kiến thức tâm đắc nhất:**
->
-> *(Ghi lại những khái niệm hoặc công cụ bạn thấy giá trị nhất tại đây...)*
-> 
-
----
-
-### 4. Điểm bạn hài lòng nhất về sản phẩm hoàn thiện
-*Gợi ý: Sự sạch sẽ của code? Repository GitHub chỉn chu? Pipeline chạy mượt mà từ đầu đến cuối? Hay việc kiểm soát tốt chi phí không tốn một đồng lãng phí nào trên AWS?*
-
-> **Điểm tự hào nhất:**
->
-> *(Viết điểm bạn hài lòng nhất tại đây...)*
-> 
-
----
-
-### 5. Kế hoạch phát triển tiếp theo (Next Steps & Future Improvements)
-*Gợi ý: Nếu có thêm thời gian hoặc làm dự án tiếp theo ở quy mô công ty lớn hơn, bạn sẽ bổ sung thêm những gì?*
-*(Ví dụ: Xây dựng Dashboard Power BI hoàn chỉnh trực quan hóa các chart doanh thu; Chuyển sang Data Ingestion Streaming với Apache Kafka/Kinesis hoặc S3 EventBridge + SQS Deferred Trigger; Thêm Data Quality Framework như Soda/Great Expectations; Triển khai CI/CD bằng GitHub Actions...)*
-
-> **Định hướng tiếp theo:**
->
-> *(Viết kế hoạch hoặc mục tiêu tương lai của bạn tại đây...)*
-> 
-
----
-
-## 📝 XÁC NHẬN ĐÓNG DỰ ÁN V2 & V3 (SIGN-OFF)
+## 📝 XÁC NHẬN ĐÓNG DỰ ÁN V2, V3 & V4 BƯỚC 1 (SIGN-OFF)
 
 - **Đánh giá tổng thể dự án:** ⭐⭐⭐⭐⭐ (5/5)
-- **Ngày nghiệm thu:** V2: 31 / 10 / 2026  •  V3 (Event-Driven): 12 / 11 / 2026
-- **Xác nhận bởi Kỹ sư dự án:** 
-  *(Ký tên hoặc điền Ao Minh Tam)*
+- **Ngày nghiệm thu:** V2: 31/10/2026 • V3 (S3 Sensor): 12/11/2026 • V4 Step 1 (S3 → SQS → Airflow): 13/11/2026
+- **Kỹ sư thực hiện:** Ao Minh Tam ([@AOMINHTAM](https://github.com/AOMINHTAM))
 
 ---
 
@@ -202,14 +155,14 @@ flowchart LR
 > [!NOTE]
 > **Trạng thái:** ✅ **ĐẠT 100% (LIVE VERIFIED TRÊN AWS & AIRFLOW 3)**
 > - **Cấu hình AWS:** Đã tạo SQS queue `olist-s3-raw-arrival-queue`, gắn SQS Access Policy cấp quyền cho S3, và bật S3 Bucket Notification trên prefix `raw/` và suffix `.csv`.
-> - **Airflow V4:** Nâng cấp `dags/ecommerce_pipeline_dag.py` dùng `SqsSensor` (timeout 45s, `soft_fail=True`, `delete_message_on_reception=False`) kết hợp module [include/sqs_parser.py](file:///d:/gehihi/aws_data_pipeline/include/sqs_parser.py).
+> - **Airflow V4:** Nâng cấp [`dags/ecommerce_pipeline_dag.py`](../dags/ecommerce_pipeline_dag.py) dùng `SqsSensor` (timeout 45s, `soft_fail=True`, `delete_message_on_reception=False`) kết hợp module [`include/sqs_parser.py`](../include/sqs_parser.py).
 > - **Kiểm thử thực tế 2 nhịp liên tiếp:**
 >   - **Nhịp 1 (`14:20:00` - Happy Path):** SQS nhận event `product_category_name_translation.csv` → Airflow tự động nạp Redshift → chạy dbt 9/9 tests PASS → archive S3 → gọi `✉️ SQS ACK` xóa message khỏi queue.
->   - **Nhịp 2 (`14:25:00` - FinOps Zero-Cost):** SQS rỗng → `SqsSensor` timeout sau 45s chuyển toàn bộ task sang **màu hồng (`SKIPPED`)**, bảo toàn ngân sách $0 Redshift RPU.
+>   - **Nhịp 2 (`14:25:00` - FinOps Zero-Cost):** SQS rỗng → `SqsSensor` timeout sau 45s chuyển toàn bộ task sang **màu hồng (`SKIPPED`)**, bảo toàn ngân sách \$0 Redshift RPU.
 > - **Bằng chứng hình ảnh nghiệm thu:**
->   - Graph View V4: [`images/airflow_v4_dag_graph.png`](file:///d:/gehihi/aws_data_pipeline/images/airflow_v4_dag_graph.png)
->   - Grid View Event-Driven & FinOps: [`images/airflow_v4_grid_event_driven.png`](file:///d:/gehihi/aws_data_pipeline/images/airflow_v4_grid_event_driven.png)
->   - SQS ACK & S3 Archive Task Logs: [`images/airflow_v4_sqs_ack_log.png`](file:///d:/gehihi/aws_data_pipeline/images/airflow_v4_sqs_ack_log.png)
+>   - Graph View V4: [`images/airflow_v4_dag_graph.png`](../images/airflow_v4_dag_graph.png)
+>   - Grid View Event-Driven & FinOps: [`images/airflow_v4_grid_event_driven.png`](../images/airflow_v4_grid_event_driven.png)
+>   - SQS ACK & S3 Archive Task Logs: [`images/airflow_v4_sqs_ack_log.png`](../images/airflow_v4_sqs_ack_log.png)
 
 
 ---

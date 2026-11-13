@@ -125,6 +125,8 @@ aws_data_pipeline/
 │       └── marts/                  # Marts layer (fct_orders, dim_customers, dim_products + schema.yml tests)
 ├── include/
 │   └── sqs_parser.py               # Modular SQS S3 Event JSON parser & deduplicator
+├── docs/
+│   └── RETROSPECTIVE.md            # Engineering retrospective, troubleshooting journey & V4 roadmap
 ├── tests/
 │   ├── dags/
 │   │   └── test_dag_example.py     # Pytest DAG validation (imports, tags, retries >= 2)
@@ -148,7 +150,6 @@ aws_data_pipeline/
 ├── .gitignore
 ├── Dockerfile                      # Astronomer Runtime 3.3 Dockerfile
 ├── Makefile                        # Automation shortcuts (verify, upload, export)
-├── PROJECT_ACCEPTANCE_REPORT.md    # Project sign-off, V4 roadmap & live verification logs
 └── requirements.txt                # Python dependencies (cosmos, dbt-redshift, airflow-providers-amazon)
 ```
 
@@ -184,7 +185,6 @@ aws_data_pipeline/
    ```bash
    git clone https://github.com/AOMINHTAM/aws-data-pipeline.git
    cd aws-data-pipeline
-   git checkout feat/v4-sqs-event-driven
    ```
 2. Verify AWS CLI connectivity:
    ```bash
@@ -230,3 +230,5 @@ make export-data
 ## 👤 Author
 * **Minh Tam Ao** - [GitHub](https://github.com/AOMINHTAM)
 * Project: *AWS E-Commerce Data Pipeline V4 (Pure Event-Driven ELT with S3, SQS & Airflow)*
+
+> 📖 *For technical challenges, troubleshooting journey, acceptance checklist, and V4 roadmap, see [Project Retrospective](docs/RETROSPECTIVE.md).*
