@@ -198,6 +198,20 @@ flowchart LR
 * Hiểu cách hai dịch vụ AWS giao tiếp bảo mật với nhau qua **Resource-based Policy** (khác với Identity-based Policy của IAM User).
 * Nắm vững cơ chế hàng đợi phân tán (**Message Queue**): `VisibilityTimeout`, `ReceiptHandle`, `Idempotent Consumer`, và cách **tách rời (Decouple)** tầng Storage (S3) khỏi tầng Compute/Orchestration (Airflow).
 
+#### 5. Kết quả Nghiệm thu Live Bước 1 (Live Verified & Accepted)
+> [!NOTE]
+> **Trạng thái:** ✅ **ĐẠT 100% (LIVE VERIFIED TRÊN AWS & AIRFLOW 3)**
+> - **Cấu hình AWS:** Đã tạo SQS queue `olist-s3-raw-arrival-queue`, gắn SQS Access Policy cấp quyền cho S3, và bật S3 Bucket Notification trên prefix `raw/` và suffix `.csv`.
+> - **Airflow V4:** Nâng cấp `dags/ecommerce_pipeline_dag.py` dùng `SqsSensor` (timeout 45s, `soft_fail=True`, `delete_message_on_reception=False`) kết hợp module [include/sqs_parser.py](file:///d:/gehihi/aws_data_pipeline/include/sqs_parser.py).
+> - **Kiểm thử thực tế 2 nhịp liên tiếp:**
+>   - **Nhịp 1 (`14:20:00` - Happy Path):** SQS nhận event `product_category_name_translation.csv` → Airflow tự động nạp Redshift → chạy dbt 9/9 tests PASS → archive S3 → gọi `✉️ SQS ACK` xóa message khỏi queue.
+>   - **Nhịp 2 (`14:25:00` - FinOps Zero-Cost):** SQS rỗng → `SqsSensor` timeout sau 45s chuyển toàn bộ task sang **màu hồng (`SKIPPED`)**, bảo toàn ngân sách $0 Redshift RPU.
+> - **Bằng chứng hình ảnh nghiệm thu:**
+>   - Graph View V4: [`images/airflow_v4_dag_graph.png`](file:///d:/gehihi/aws_data_pipeline/images/airflow_v4_dag_graph.png)
+>   - Grid View Event-Driven & FinOps: [`images/airflow_v4_grid_event_driven.png`](file:///d:/gehihi/aws_data_pipeline/images/airflow_v4_grid_event_driven.png)
+>   - SQS ACK & S3 Archive Task Logs: [`images/airflow_v4_sqs_ack_log.png`](file:///d:/gehihi/aws_data_pipeline/images/airflow_v4_sqs_ack_log.png)
+
+
 ---
 
 ### BƯỚC 2: dbt Incremental Modeling (`materialized='incremental'` & Upsert/Merge)
