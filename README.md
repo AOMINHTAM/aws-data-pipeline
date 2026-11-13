@@ -8,22 +8,32 @@
 
 An enterprise-grade, **pure event-driven ELT Data Pipeline** built on the **Modern Data Stack (MDS)** using **AWS (S3, SQS & Redshift Serverless)**, **dbt Core**, and **Apache Airflow 3 (via Astro CLI & Astronomer Cosmos)**.
 
-Upgraded from a manual V2 baseline directly into a resilient **V4 Push-Based Event-Driven Architecture**: Amazon S3 automatically pushes `s3:ObjectCreated:*` events into an **AWS SQS Queue** (`olist-s3-raw-arrival-queue`), Airflow 3 senses incoming messages via `SqsSensor` with **Zero Polling Latency**, skips downstream warehouse compute when the queue is empty (**\$0 Redshift RPU cost**), idempotently reloads **Amazon Redshift Serverless**, transforms data into a **Kimball Star Schema** with **9/9 dbt quality tests**, archives processed CSVs, and safely **ACKs (deletes) SQS messages** with **At-Least-Once Delivery** guarantees.
+Upgraded from a manual V2 baseline directly into a resilient **V4 Push-Based Event-Driven & Incremental ELT Architecture**: Amazon S3 automatically pushes `s3:ObjectCreated:*` events into an **AWS SQS Queue** (`olist-s3-raw-arrival-queue`), Airflow 3 senses incoming messages via `SqsSensor` with **Zero Polling Latency**, skips downstream warehouse compute when the queue is empty (**\$0 Redshift RPU cost**), idempotently reloads **Amazon Redshift Serverless**, runs **dbt Incremental Modeling** (`delete+insert` with a 3-day lookback window on `fct_orders` and `dim_customers`) alongside **9/9 dbt quality tests**, archives processed CSVs, and safely **ACKs (deletes) SQS messages** with **At-Least-Once Delivery** guarantees.
 
 ---
 
 ## 🏛️ System Architecture: Before (V2 Baseline) vs. After (V4 Event-Driven)
 
-```mermaid
-flowchart LR
-    A["Raw Data (CSV)\n(9 Olist datasets)"] -->|"Upload / Sync\n(Arrival)"| B["Amazon S3 Landing\n(s3://.../raw/)"]
-    B -->|"s3:ObjectCreated:*\n(Push < 1s)"| C["AWS SQS Queue\n(olist-s3-raw-arrival-queue)"]
-    C -->|"1. SqsSensor (*/5)\nEmpty -> SKIP ($0 RPU)"| D["Apache Airflow 3\n(Astro CLI & Cosmos)"]
-    D -->|"2. @task load_raw_from_sqs\n(Parse JSON -> TRUNCATE + COPY)"| E["Redshift Serverless (4 RPUs)\n(Bronze raw_data)"]
-    E -->|"3. dbt Staging Views\n(public_staging)"| F["dbt Marts Tables\n(public_marts Star Schema\n& 9/9 Quality Tests)"]
-    F -->|"4. @task archive_and_ack\n(Move to archive/ & Delete SQS Msg)"| G["Amazon S3 Archive\n& SQS ACK\n(At-Least-Once / Zero Loss)"]
-    F -->|"Python Export\n(redshift-connector)"| H["BI Consumption\n(Power BI / CSVs / Pandas)"]
-```
+<table width="100%">
+  <tr>
+    <th width="50%">Before — V2 (Manual Batch Baseline)</th>
+    <th width="50%">After — V4 (Pure Event-Driven &amp; Incremental ELT)</th>
+  </tr>
+  <tr>
+    <td align="center">
+      <a href="images/architecture.png">
+        <img src="images/architecture.png" alt="V2 Baseline System Architecture" width="100%" />
+      </a>
+    </td>
+    <td align="center">
+      <a href="images/architecture_v4.png">
+        <img src="images/architecture_v4.png" alt="V4 Event-Driven System Architecture" width="100%" />
+      </a>
+    </td>
+  </tr>
+</table>
+
+> *Tip: Click either diagram above to inspect the full-resolution architecture layout (`V2` [`images/architecture.png`](images/architecture.png) vs. `V4` [`images/architecture_v4.png`](images/architecture_v4.png)).*
 
 ### Architectural Evolution Comparison (V2 vs. V4)
 
@@ -36,7 +46,7 @@ flowchart LR
 | **Data Ingestion (S3 → DWH)** | Static manual SQL script (`copy_raw_tables.sql`) | Dynamic `@task load_raw_from_sqs`: Modular parser, URL unquoting, deduplication, and atomic `TRUNCATE + COPY`. |
 | **FinOps Cost Optimization** | Full pipeline runs on trigger | `SqsSensor` with `soft_fail=True` (timeout 45s): Empty queue marks `SKIPPED` (**\$0 Redshift RPU cost**). |
 | **Data Lifecycle & SQS ACK** | Files lingered indefinitely in `raw/` | `@task archive_and_ack_sqs_messages`: S3 archive (`raw/` → `archive/<timestamp>/`) + atomic SQS Message Deletion (`delete_message`). |
-| **Data Modeling & Governance** | Basic tables / manual scripts | Multi-layered Medallion Kimball Star Schema via **Astronomer Cosmos** with 9 automated dbt tests. |
+| **Data Modeling & Governance** | Basic tables / manual full rebuilds | Multi-layered Medallion Kimball Star Schema via **Astronomer Cosmos** with **Incremental Marts (`delete+insert`, 3-day lookback)** on `fct_orders` & `dim_customers` + 9 automated dbt tests. |
 
 ---
 
@@ -102,10 +112,10 @@ Dependency lineage from 9 `raw_data` sources through 7 `public_staging` views in
 * **Multi-Layered Medallion Architecture:**
   * **`raw_data` (Bronze):** Raw tables mirroring Olist S3 CSVs (99,441 orders loaded, refreshed idempotently on batch arrival).
   * **`public_staging` (Silver - Views):** 7 staging views standardizing naming conventions, fixing column typos (e.g., `product_name_lenght`), and casting types with zero storage duplication.
-  * **`public_marts` (Gold - Physical Tables):**
-    * **`fct_orders`:** Order-grain fact table combining revenue, freight costs, delivery SLA performance (`is_delayed`), and review scores.
-    * **`dim_customers`:** Customer dimension with **Customer Lifetime Value (LTV)**, purchase frequency, and segmentation (`Returning Customer` vs. `One-Time Customer`).
-    * **`dim_products`:** Product dimension with English translations and volumetric measurements.
+  * **`public_marts` (Gold - Physical & Incremental Tables):**
+    * **`fct_orders` (`materialized='incremental'`, `unique_key='order_id'`):** Order-grain fact table combining revenue, freight costs, delivery SLA performance (`is_delayed`), and review scores using **`delete+insert`** with a 3-day lookback window on purchase & delivery timestamps.
+    * **`dim_customers` (`materialized='incremental'`, `unique_key='customer_id'`):** Customer dimension computing **Customer Lifetime Value (LTV)**, purchase frequency, and segmentation (`Returning Customer` vs. `One-Time Customer`) — resolving impacted `customer_unique_id` histories before incremental upsert so lifetime totals remain exact.
+    * **`dim_products` (`materialized='table'`):** Static product dimension with English translations and volumetric measurements.
 * **Data Quality Testing:** 9 automated dbt tests enforcing `unique`, `not_null`, and foreign key `relationships` across Fact and Dimensions.
 
 ---
@@ -135,8 +145,9 @@ aws_data_pipeline/
 ├── data/                           # Olist CSV files (git-ignored)
 ├── exports/                        # Clean analytics CSV exports for Power BI (git-ignored)
 ├── images/
-│   ├── architecture.png            # V2 System Architecture diagram (Baseline)
+│   ├── architecture.png            # V2 System Architecture diagram (Before / Baseline)
 │   ├── architecture_v3.png         # Intermediate V3 diagram
+│   ├── architecture_v4.png         # V4 System Architecture diagram (After / Event-Driven & Incremental)
 │   ├── airflow_v4_dag_graph.png    # V4 Event-Driven DAG Graph screenshot
 │   ├── airflow_v4_grid_event_driven.png # V4 Grid View (Happy Path vs. FinOps Skip)
 │   ├── airflow_v4_sqs_ack_log.png  # V4 SQS ACK and S3 Archival task execution log
