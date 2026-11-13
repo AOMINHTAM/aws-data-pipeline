@@ -8,27 +8,21 @@
 
 | Thuộc tính | Chi tiết |
 | :--- | :--- |
-| **Tên dự án** | **End-to-End Event-Driven AWS E-Commerce Data Pipeline & Kimball Star Schema Analytics (V3)** |
+| **Tên dự án** | **End-to-End Event-Driven AWS E-Commerce Data Pipeline & Kimball Star Schema Analytics (V4)** |
 | **Kỹ sư thực hiện** | Ao Minh Tam ([@AOMINHTAM](https://github.com/AOMINHTAM)) |
 | **Repository** | [github.com/AOMINHTAM/aws-data-pipeline](https://github.com/AOMINHTAM/aws-data-pipeline) |
 | **Dataset sử dụng** | Olist Brazilian E-Commerce Dataset (~120MB, ~100k đơn hàng, 9 quan hệ) |
-| **Công nghệ cốt lõi** | AWS (S3, Redshift Serverless, IAM), dbt Core, Apache Airflow 3 (Astro CLI & Astronomer Cosmos), Docker, Python (`redshift-connector`, `pandas`), WSL2 Ubuntu |
-| **Lịch sử hoàn thành** | **V2 (Baseline):** Tháng 10/2026 • **V3 (Event-Driven Automation):** Tháng 11/2026 |
+| **Công nghệ cốt lõi** | AWS (S3, SQS, Redshift Serverless, IAM), dbt Core, Apache Airflow 3 (Astro CLI & Astronomer Cosmos), Docker, Python (`redshift-connector`, `pandas`), WSL2 Ubuntu |
+| **Lịch sử hoàn thành** | **V2 (Baseline):** 10/2026 • **V3 (S3 Sensor):** 12/11/2026 • **V4 Bước 1 (SQS) & Bước 2 (dbt Incremental):** 13/11/2026 |
 | **Trạng thái** | ✅ **HOÀN THÀNH TOÀN DIỆN (100% ACCEPTED & LIVE VERIFIED)** |
 
 ---
 
-## 🏗️ KIẾN TRÚC HỆ THỐNG ĐÃ XÂY DỰNG (V3 EVENT-DRIVEN)
+## 🏗️ TIẾN HÓA KIẾN TRÚC HỆ THỐNG (V2 → V4)
 
-```mermaid
-flowchart LR
-    A["Raw Data (CSV)\n(9 datasets)"] -->|"scripts/upload_to_s3.sh\n(aws s3 sync)"| B["Amazon S3 Landing\n(s3://.../raw/)"]
-    B -->|"1. S3KeySensor (*/15)\nEmpty -> SKIP ($0 RPU)"| C["Apache Airflow 3\n(Astro CLI / Cosmos)"]
-    C -->|"2. @task load_raw_from_s3\n(TRUNCATE + COPY via IAM)"| D["Redshift Serverless (4 RPUs)\n(raw_data Bronze)"]
-    D -->|"3. dbt Staging Views\n(public_staging)"| E["dbt Marts Tables\n(public_marts Star Schema\n& 9/9 Quality Tests)"]
-    E -->|"4. @task archive_s3_files\n(Move raw/ -> archive/<ts>/)"| F["Amazon S3 Archive\n(Zero Duplicates)"]
-    E -->|"Python Export\n(redshift-connector)"| G["BI Consumption\n(Power BI / CSVs / Pandas)"]
-```
+| V2 (Manual Batch Baseline) | V4 (Pure Event-Driven & Incremental ELT) |
+| :---: | :---: |
+| ![V2 Architecture](../images/architecture.png) | ![V4 Architecture](../images/architecture_v4.png) |
 
 ---
 
@@ -169,44 +163,30 @@ flowchart LR
 
 ---
 
-### BƯỚC 2: dbt Incremental Modeling (`materialized='incremental'` & Upsert/Merge)
+### BƯỚC 2: dbt Incremental Modeling (`materialized='incremental'` & `delete+insert`) — `✅ ĐÃ HOÀN THÀNH`
 
-#### 1. Cái gì chuẩn bị làm (What to build)
-1. Thay đổi cơ chế nạp dữ liệu và cấu hình các model lớn trong `dbt/models/marts/` (đặc biệt là `fct_orders.sql` và `dim_customers.sql`) từ `materialized='table'` sang **`materialized='incremental'`** với `unique_key='order_id'` (hoặc chiến lược `merge` / `delete+insert` trên Redshift).
-2. Bổ sung khối logic jinja `{% if is_incremental() %}` trong câu SQL của dbt để chỉ lọc các bản ghi mới hoặc vừa được cập nhật.
-3. Kiểm thử thực tế: Chạy lần 1 (Full Load) → Nạp thêm một batch đơn hàng mới/cập nhật trạng thái đơn cũ → Chạy lần 2 (Incremental Load) và kiểm tra SQL mà dbt sinh ra trong log của Redshift.
+#### 1. Những gì đã triển khai (What Was Built)
+1. Nâng cấp [`dbt/models/marts/fct_orders.sql`](../dbt/models/marts/fct_orders.sql) sang **`materialized='incremental'`** (`unique_key='order_id'`, `incremental_strategy='delete+insert'`, `on_schema_change='sync_all_columns'`) với **lookback window 3 ngày** trên cả `order_purchase_timestamp` và `order_delivered_customer_date`, kết hợp lọc `WHERE EXISTS` xuống các CTE `order_items`, `payments`, `reviews`.
+2. Nâng cấp [`dbt/models/marts/dim_customers.sql`](../dbt/models/marts/dim_customers.sql) sang **`materialized='incremental'`** (`unique_key='customer_id'`, `incremental_strategy='delete+insert'`, `on_schema_change='sync_all_columns'`). Do Olist cấp `customer_id` mới theo từng đơn nhưng khách thật được định danh bằng `customer_unique_id`, model xác định trước `affected_customers` ở mức `customer_unique_id` (lookback 3 ngày + `customer_id` mới chưa có trong `{{ this }}`) rồi gom lại toàn bộ lịch sử đơn/thanh toán của đúng nhóm khách bị ảnh hưởng đó để giữ nguyên độ chính xác của chỉ số LTV (`total_orders`, `lifetime_spend`, `first_order_date`).
+3. Chủ động giữ [`dbt/models/marts/dim_products.sql`](../dbt/models/marts/dim_products.sql) ở dạng `materialized='table'` vì là bảng danh mục tĩnh dung lượng nhỏ.
 
-#### 2. Mục đích — Vì sao phải làm (Why)
-* **Giải bài toán Chi phí & Hiệu năng ở quy mô lớn (Scale):** Với `materialized='table'`, mỗi lần chạy dbt sẽ thực hiện `DROP TABLE` và `CREATE TABLE AS SELECT ...` quét lại toàn bộ 100% lịch sử. Nếu bảng có 100 triệu đơn hàng mà mỗi 5 phút chỉ có thêm 500 đơn mới, việc dựng lại cả bảng 100 triệu dòng là sự lãng phí tài nguyên không thể chấp nhận trong thực tế.
-* **Bảo toàn dữ liệu lịch sử khi nạp theo từng lô nhỏ (Micro-batch):** Khi kết hợp với SQS ở Bước 1, mỗi lần chỉ có một vài file/lô dữ liệu mới đi vào. Cơ chế Incremental giúp **cộng dồn và cập nhật (Upsert)** vào bảng đích thay vì xóa trắng dữ liệu cũ.
+#### 2. Cơ chế hoạt động bên dưới (Under-the-Hood Mechanism)
+* **Lần chạy đầu / `--full-refresh` (`is_incremental() == False`):** Thực thi full build nạp toàn bộ lịch sử.
+* **Các lần chạy incremental (`is_incremental() == True`):**
+  * Áp dụng bộ lọc **High-Water Mark + Lookback 3 ngày** (`dateadd(day, -3, coalesce(max(...), cast('2016-01-01' as timestamp)))` từ `{{ this }}`) để vừa nhận đơn mới vừa cập nhật đơn cũ mới giao hàng mà không quét lại toàn bộ lịch sử.
+  * **Upsert nguyên tử (`delete+insert`) trên Redshift:** dbt tạo bảng tạm `*__dbt_tmp*`, chạy `DELETE FROM target WHERE (unique_key) IN (SELECT DISTINCT unique_key FROM tmp)` rồi `INSERT INTO target SELECT ... FROM tmp`.
 
-#### 3. Cơ chế hoạt động bên dưới (Under-the-hood Mechanism)
-* **Lần chạy đầu tiên (khi bảng đích chưa tồn tại hoặc chạy `--full-refresh`):**
-  * Hàm `is_incremental()` trả về `False`.
-  * dbt bỏ qua điều kiện `WHERE` và chạy `CREATE TABLE public_marts.fct_orders AS SELECT ...` nạp toàn bộ lịch sử.
-* **Các lần chạy tiếp theo (khi bảng `public_marts.fct_orders` đã tồn tại):**
-  * Hàm `is_incremental()` trả về `True`.
-  * dbt kích hoạt bộ lọc **High-Water Mark (Cột mốc thời gian lớn nhất)**:
-    ```sql
-    {% if is_incremental() %}
-      WHERE order_purchase_timestamp >= (SELECT MAX(order_purchase_timestamp) FROM {{ this }})
-    {% endif %}
-    ```
-    *(Biến `{{ this }}` chính là tên bảng đích `public_marts.fct_orders` hiện tại trong Redshift).*
-* **Cơ chế Upsert (`delete+insert` / `merge`) trên Redshift:**
-  * Để tránh bị nhân đôi dòng (duplicate) khi một đơn hàng cũ thay đổi trạng thái (ví dụ từ `shipped` sang `delivered`), dbt tạo một bảng tạm (`fct_orders__dbt_tmp`) chỉ chứa các dòng mới/thay đổi.
-  * Sau đó trong **1 Transaction nguyên tử (Atomic Transaction)**, Redshift thực hiện:
-    1. `DELETE FROM public_marts.fct_orders WHERE order_id IN (SELECT order_id FROM fct_orders__dbt_tmp);` (Xóa bản ghi cũ của những đơn vừa cập nhật).
-    2. `INSERT INTO public_marts.fct_orders SELECT * FROM fct_orders__dbt_tmp;` (Chèn bản ghi mới nhất vào).
-
-#### 4. Học được gì từ Bước 2 (Engineering Takeaways)
-* Nắm vững kỹ thuật **Incremental Data Modeling** — câu hỏi phỏng vấn bắt buộc ở mọi vị trí Data Engineer / Analytics Engineer.
-* Hiểu rõ khái niệm **High-Water Mark**, cách xử lý **Late-Arriving Data** (dữ liệu đến muộn bằng khoảng lùi thời gian `lookback window`), và sự khác biệt giữa **Append-only** vs. **Upsert (`unique_key`)**.
-* Đọc hiểu được mã DDL/DML thực tế mà `dbt-redshift` biên dịch ra phía sau lớp macro Jinja.
+#### 3. Kết quả Nghiệm thu Live Bước 2 & Giá trị rút ra
+> [!NOTE]
+> **Trạng thái:** ✅ **ĐẠT 100% (LIVE VERIFIED TRÊN REDSHIFT SERVERLESS)**
+> - **`dbt compile` (incremental) & `dbt compile --full-refresh`:** Biên dịch sạch cả 10 models, 9 tests, 9 sources trên cả hai nhánh `is_incremental()` (`True` và `False`).
+> - **`dbt run --select fct_orders dim_customers`:** **PASS 2/2** (`fct_orders` `37.38s`, `dim_customers` `39.20s`, tổng `56.29s`).
+> - **`dbt test`:** **PASS 9/9** (`28.75s`, `WARN=0 ERROR=0`) gồm `unique`, `not_null`, và `relationships`.
+* **Takeaways:** Làm chủ kỹ thuật **Incremental Data Modeling**, **High-Water Mark**, **Late-Arriving Data**, bài toán giữ toàn vẹn **LTV theo `customer_unique_id`** khi grain của bảng là `customer_id`, và cơ chế `delete+insert` trên Redshift.
 
 ---
 
-### BƯỚC 3: Lightweight Observability & Webhook Alerting (Trải nghiệm Cơ chế Giám sát)
+### BƯỚC 3: Lightweight Observability & Webhook Alerting — `🗓️ TÙY CHỌN / BACKLOG`
 
 #### 1. Cái gì chuẩn bị làm (What to build)
 * Viết một hàm callback gọn nhẹ trong Python (`send_pipeline_notification(context)`) gắn vào `on_success_callback` / `on_failure_callback` của DAG Airflow.

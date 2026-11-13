@@ -1,34 +1,78 @@
+{{
+    config(
+        materialized='incremental',
+        unique_key='order_id',
+        incremental_strategy='delete+insert',
+        on_schema_change='sync_all_columns'
+    )
+}}
+
 with orders as (
-    select * from {{ ref('stg_orders') }}
+    select *
+    from {{ ref('stg_orders') }} o
+    {% if is_incremental() %}
+    -- Lookback window 3 ngày tính từ high-water mark trên {{ this }}:
+    -- Vừa nhận đơn hàng mới, vừa cập nhật các đơn cũ mới có ngày giao hàng (late delivery updates)
+    where o.order_purchase_timestamp >= (
+        select dateadd(day, -3, coalesce(max(order_purchase_timestamp), cast('2016-01-01' as timestamp)))
+        from {{ this }}
+    )
+    or o.order_delivered_customer_date >= (
+        select dateadd(day, -3, coalesce(max(order_delivered_customer_date), cast('2016-01-01' as timestamp)))
+        from {{ this }}
+    )
+    {% endif %}
 ),
 
 order_items as (
     select
-        order_id,
-        count(order_item_id) as total_items,
-        sum(price) as total_item_value,
-        sum(freight_value) as total_freight_value,
-        sum(total_item_value) as total_order_cost
-    from {{ ref('stg_order_items') }}
-    group by order_id
+        oi.order_id,
+        count(oi.order_item_id) as total_items,
+        sum(oi.price) as total_item_value,
+        sum(oi.freight_value) as total_freight_value,
+        sum(oi.total_item_value) as total_order_cost
+    from {{ ref('stg_order_items') }} oi
+    {% if is_incremental() %}
+    -- Chỉ gom nhóm chi tiết mặt hàng cho các đơn nằm trong tập incremental ở trên
+    where exists (
+        select 1
+        from orders o
+        where o.order_id = oi.order_id
+    )
+    {% endif %}
+    group by oi.order_id
 ),
 
 payments as (
     select
-        order_id,
-        sum(payment_value) as total_payment_value,
-        max(payment_installments) as max_installments,
-        min(payment_type) as primary_payment_type
-    from {{ ref('stg_payments') }}
-    group by order_id
+        p.order_id,
+        sum(p.payment_value) as total_payment_value,
+        max(p.payment_installments) as max_installments,
+        min(p.payment_type) as primary_payment_type
+    from {{ ref('stg_payments') }} p
+    {% if is_incremental() %}
+    where exists (
+        select 1
+        from orders o
+        where o.order_id = p.order_id
+    )
+    {% endif %}
+    group by p.order_id
 ),
 
 reviews as (
     select
-        order_id,
-        avg(review_score) as review_score
-    from {{ ref('stg_reviews') }}
-    group by order_id
+        r.order_id,
+        avg(r.review_score) as review_score
+    from {{ ref('stg_reviews') }} r
+    {% if is_incremental() %}
+    where exists (
+        select 1
+        from orders o
+        where o.order_id = r.order_id
+    )
+    {% endif %}
+    group by r.order_id
 ),
 
 final as (

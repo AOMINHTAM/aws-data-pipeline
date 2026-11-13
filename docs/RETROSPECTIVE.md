@@ -13,23 +13,16 @@
 | **Repository** | [github.com/AOMINHTAM/aws-data-pipeline](https://github.com/AOMINHTAM/aws-data-pipeline) |
 | **Dataset** | Olist Brazilian E-Commerce Dataset (~120 MB, ~100k orders, 9 relational tables) |
 | **Core Stack** | AWS (S3, SQS, Redshift Serverless, IAM), dbt Core, Apache Airflow 3 (Astro CLI & Astronomer Cosmos), Docker, Python (`redshift-connector`, `pandas`), Ubuntu WSL2 |
-| **Milestones** | **V2 (Baseline):** Oct 2026 • **V3 (S3 Sensor):** Nov 12, 2026 • **V4 Step 1 (S3 → SQS → Airflow):** Nov 13, 2026 |
+| **Milestones** | **V2 (Baseline):** Oct 2026 • **V3 (S3 Sensor):** Nov 12, 2026 • **V4 Step 1 (S3 → SQS → Airflow):** Nov 13, 2026 • **V4 Step 2 (dbt Incremental):** Nov 13, 2026 |
 | **Status** | ✅ **100% ACCEPTED & LIVE VERIFIED** |
 
 ---
 
-## 🏗️ SYSTEM ARCHITECTURE EVOLUTION (V2 → V3 → V4)
+## 🏗️ SYSTEM ARCHITECTURE EVOLUTION (V2 → V4)
 
-```mermaid
-flowchart LR
-    A["Raw Data (CSV)\n(9 datasets)"] -->|"scripts/upload_to_s3.sh\n(aws s3 sync / cp)"| B["Amazon S3 Landing\n(s3://.../raw/)"]
-    B -->|"s3:ObjectCreated:*\n(Push < 1s)"| C["AWS SQS Queue\n(olist-s3-raw-arrival-queue)"]
-    C -->|"1. SqsSensor (*/5)\nEmpty -> SKIP ($0 RPU)"| D["Apache Airflow 3\n(Astro CLI / Cosmos)"]
-    D -->|"2. @task load_raw_from_sqs\n(TRUNCATE + COPY via IAM)"| E["Redshift Serverless (4 RPUs)\n(raw_data Bronze)"]
-    E -->|"3. dbt Staging Views\n(public_staging)"| F["dbt Marts Tables\n(public_marts Star Schema\n& 9/9 Quality Tests)"]
-    F -->|"4. @task archive_and_ack\n(Move raw/ -> archive/ & ACK SQS)"| G["Amazon S3 Archive & SQS ACK\n(At-Least-Once Delivery)"]
-    F -->|"Python Export\n(redshift-connector)"| H["BI Consumption\n(Power BI / CSVs / Pandas)"]
-```
+| V2 (Manual Batch Baseline) | V4 (Pure Event-Driven & Incremental ELT) |
+| :---: | :---: |
+| ![V2 Architecture](../images/architecture.png) | ![V4 Architecture](../images/architecture_v4.png) |
 
 ---
 
@@ -126,29 +119,30 @@ flowchart LR
 
 ---
 
-### STEP 2: dbt Incremental Modeling (`materialized='incremental'` & Upsert/Merge) — `🗓️ NEXT`
+### STEP 2: dbt Incremental Modeling (`materialized='incremental'` & `delete+insert`) — `✅ COMPLETED`
 
-#### 1. What to Build
-1. Refactor large mart models in `dbt/models/marts/` (especially `fct_orders.sql` and `dim_customers.sql`) from `materialized='table'` to **`materialized='incremental'`** with `unique_key='order_id'` (`delete+insert` / `merge` strategy on Redshift).
-2. Add Jinja `{% if is_incremental() %}` high-water mark filters to process only newly arrived or updated records.
-3. Validate in Redshift: Execute Full Load → ingest a delta batch of new/updated orders → execute Incremental Load and inspect generated Redshift DML transactions.
+#### 1. What Was Built
+1. Converted [`dbt/models/marts/fct_orders.sql`](../dbt/models/marts/fct_orders.sql) to **`materialized='incremental'`** (`unique_key='order_id'`, `incremental_strategy='delete+insert'`, `on_schema_change='sync_all_columns'`) with a **3-day lookback window** on both `order_purchase_timestamp` and `order_delivered_customer_date`, plus `WHERE EXISTS` pruning across `order_items`, `payments`, and `reviews` CTEs.
+2. Converted [`dbt/models/marts/dim_customers.sql`](../dbt/models/marts/dim_customers.sql) to **`materialized='incremental'`** (`unique_key='customer_id'`, `incremental_strategy='delete+insert'`, `on_schema_change='sync_all_columns'`). Because Olist issues a new `customer_id` per order while tracking people by `customer_unique_id`, the model resolves `affected_customers` at the `customer_unique_id` grain first (3-day lookback + brand-new `customer_id`s) and re-aggregates full order/payment histories only for those impacted people so LTV metrics stay exact.
+3. Intentionally left [`dbt/models/marts/dim_products.sql`](../dbt/models/marts/dim_products.sql) as `materialized='table'` (small static lookup dimension).
 
 #### 2. Under-the-Hood Mechanism
-* **Initial Run (`is_incremental() == False`):** Executes full `CREATE TABLE public_marts.fct_orders AS SELECT ...`.
-* **Subsequent Runs (`is_incremental() == True`):** Applies a **High-Water Mark** lookback filter:
-  ```sql
-  {% if is_incremental() %}
-    WHERE order_purchase_timestamp >= (SELECT MAX(order_purchase_timestamp) FROM {{ this }})
-  {% endif %}
-  ```
-* **Atomic Upsert (`delete+insert`) on Redshift:** Stage delta records into a temporary table (`fct_orders__dbt_tmp`), then atomically `DELETE` matching `unique_key` rows and `INSERT` updated records in a single transaction to prevent duplicates on order status updates.
+* **Initial / Full-Refresh Run (`is_incremental() == False`):** Falls back to loading complete history (`CREATE TABLE ... AS SELECT ...`).
+* **Incremental Runs (`is_incremental() == True`):**
+  * Applies high-water mark lookback filters (`dateadd(day, -3, coalesce(max(...), cast('2016-01-01' as timestamp)))` from `{{ this }}`) to catch both newly arrived orders and late-arriving delivery updates without scanning unchanged history.
+  * **Atomic Upsert (`delete+insert`) on Redshift:** Stages changed keys in `*__dbt_tmp*`, executes `DELETE FROM target WHERE (unique_key) IN (SELECT DISTINCT unique_key FROM tmp)`, and `INSERT INTO target SELECT ... FROM tmp` cleanly.
 
-#### 3. Engineering Takeaways
-* Mastery of **Incremental Data Modeling**, **High-Water Marks**, **Late-Arriving Data** (lookback windows), and **Append-only** vs. **Upsert (`unique_key`)** patterns.
+#### 3. Step 2 Live Verification Results & Engineering Takeaways
+> [!NOTE]
+> **Status:** ✅ **100% PASS (LIVE VERIFIED ON REDSHIFT SERVERLESS)**
+> - **`dbt compile` (incremental) & `dbt compile --full-refresh`:** Compiled cleanly across all 10 models, 9 tests, and 9 sources (`is_incremental()` True and False branches verified).
+> - **`dbt run --select fct_orders dim_customers`:** **PASS 2/2** (`fct_orders` `37.38s`, `dim_customers` `39.20s`, total `56.29s`).
+> - **`dbt test`:** **PASS 9/9** (`28.75s`, `WARN=0 ERROR=0`) including `unique`, `not_null`, and `relationships`.
+* **Takeaways:** Mastery of **Incremental Data Modeling**, **High-Water Marks**, **Late-Arriving Data** (lookback windows), **grain vs. lifetime entity re-aggregation** (`dim_customers`), and Redshift `delete+insert` compilation.
 
 ---
 
-### STEP 3: Lightweight Observability & Webhook Alerting — `🗓️ PLANNED`
+### STEP 3: Lightweight Observability & Webhook Alerting — `🗓️ OPTIONAL / BACKLOG`
 
 #### 1. What to Build
 * Implement a Python callback (`send_pipeline_notification(context)`) attached to Airflow DAG `on_success_callback` / `on_failure_callback`.
