@@ -26,6 +26,10 @@ exports/
 *.csv
 *.zip
 
+# Local-only notes & interview guides (never push to GitHub)
+*.local.md
+docs/*.local.md
+
 # OS & IDE
 .DS_Store
 .idea/

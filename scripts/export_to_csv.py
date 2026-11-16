@@ -40,14 +40,15 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv_fallback(PROJECT_ROOT / ".env")
 
 try:
-    from dotenv import load_dotenv
+    from dotenv import load_dotenv  # noqa: E402
+
     load_dotenv(PROJECT_ROOT / ".env")
 except ImportError:
     pass
 
 # --- Kiểm tra dependencies ---
 try:
-    import redshift_connector
+    import redshift_connector  # noqa: E402
 except ImportError:
     print("\n❌ LỖI: Chưa cài đặt thư viện 'redshift-connector'!")
     print("👉 Hãy chạy lệnh sau trên terminal để cài đặt:")
@@ -55,7 +56,7 @@ except ImportError:
     sys.exit(1)
 
 try:
-    import pandas as pd
+    import pandas  # noqa: E402, F401
 except ImportError:
     print("\n❌ LỖI: Chưa cài đặt thư viện 'pandas'!")
     print("👉 Hãy chạy lệnh sau trên terminal để cài đặt:")

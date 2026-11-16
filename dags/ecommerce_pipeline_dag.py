@@ -12,7 +12,8 @@ from cosmos import DbtTaskGroup, ProfileConfig, ProjectConfig
 
 # Đảm bảo import được module từ include/
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
-from include.sqs_parser import (
+from include.ingestion_guards import ensure_non_empty_stage  # noqa: E402
+from include.sqs_parser import (  # noqa: E402
     CSV_TO_RAW_TABLE,
     deduplicate_sqs_messages,
     extract_messages_from_asset_events,
@@ -26,9 +27,12 @@ default_args = {
     "retry_delay": timedelta(minutes=2),
 }
 
-# Cấu hình đường dẫn dbt bên trong Docker container của Airflow
-DBT_PROJECT_PATH = "/usr/local/airflow/dbt"
-DBT_PROFILES_PATH = "/usr/local/airflow/dbt/profiles.yml"
+# Đường dẫn dbt linh hoạt: tự resolve theo repo root (/usr/local/airflow/dbt trong Astro Docker)
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+DBT_PROJECT_PATH = os.getenv("DBT_PROJECT_PATH", os.path.join(PROJECT_ROOT, "dbt"))
+DBT_PROFILES_PATH = os.getenv(
+    "DBT_PROFILES_PATH", os.path.join(DBT_PROJECT_PATH, "profiles.yml")
+)
 
 # Cấu hình AWS S3, SQS & Redshift Serverless (đọc từ .env)
 AWS_REGION = os.getenv("AWS_DEFAULT_REGION", "us-east-1")
@@ -41,7 +45,7 @@ SQS_QUEUE_URL = os.getenv(
     "SQS_QUEUE_URL",
     f"https://sqs.{AWS_REGION}.amazonaws.com/205506434601/{SQS_QUEUE_NAME}",
 )
-# 15 phút VisibilityTimeout: đủ dư cho Redshift staging COPY + dbt incremental + 9 tests
+# 15 phút VisibilityTimeout: đủ dư cho Redshift staging COPY + dbt incremental + data quality tests
 SQS_VISIBILITY_TIMEOUT = int(os.getenv("SQS_VISIBILITY_TIMEOUT", "900"))
 
 REDSHIFT_IAM_ROLE = os.getenv(
@@ -92,14 +96,19 @@ sqs_raw_arrival_asset = Asset(
 )
 
 
-def _delete_sqs_handles(sqs_client, receipt_handles: list[str], context_label: str) -> None:
-    """Xóa danh sách SQS messages theo ReceiptHandle (ACK) sau khi xử lý xong hoặc lọc bỏ."""
+def _delete_sqs_handles(
+    sqs_client, receipt_handles: list[str], context_label: str
+) -> list[str]:
+    """Xóa danh sách SQS messages theo ReceiptHandle (ACK) và trả về danh sách handle lỗi (nếu có)."""
+    failed_handles: list[str] = []
     for handle in receipt_handles:
         try:
             sqs_client.delete_message(QueueUrl=SQS_QUEUE_URL, ReceiptHandle=handle)
             print(f"✉️ SQS ACK ({context_label}): Đã xóa message {handle[:18]}... khỏi queue.")
         except Exception as err:
+            failed_handles.append(handle)
             print(f"Cảnh báo khi xóa SQS message ({context_label}): {err}")
+    return failed_handles
 
 
 def _collect_sqs_messages(context: dict, sqs_client) -> list[dict]:
@@ -245,7 +254,9 @@ with DAG(
                     """
                     cursor.execute(copy_sql)
                     cursor.execute(f"SELECT COUNT(*) FROM {tmp_table};")
-                    staged_rows = cursor.fetchone()[0]
+                    staged_rows = ensure_non_empty_stage(
+                        cursor.fetchone()[0], s3_uri, table_name
+                    )
                     conn.commit()
                     print(f"Đã stage {staged_rows} dòng từ '{file_info['filename']}'.")
 
@@ -270,14 +281,14 @@ with DAG(
 
         return loaded_items
 
-    # 2. Cosmos parse dbt project thành TaskGroup (chạy staging views, incremental marts & 9 tests)
+    # 2. Cosmos parse dbt project thành TaskGroup (chạy staging views, incremental marts & dbt tests)
     dbt_transform = DbtTaskGroup(
         group_id="dbt_transformation_and_tests",
         project_config=project_config,
         profile_config=profile_config,
     )
 
-    # 3. Chỉ archive S3 -> xóa khỏi raw/ -> ACK (delete) SQS KHI VÀ CHỈ KHI dbt & 9/9 tests PASS
+    # 3. Chỉ archive S3 -> xóa khỏi raw/ -> ACK (delete) SQS KHI VÀ CHỈ KHI dbt & data quality tests PASS
     @task
     def archive_and_ack_sqs_messages(loaded_items: list[dict]) -> None:
         if not loaded_items:
@@ -290,6 +301,7 @@ with DAG(
         run_stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
         archived_count = 0
+        failed_acks: list[str] = []
         for item in loaded_items:
             src_key = item["s3_key"]
             filename = item["filename"]
@@ -313,10 +325,18 @@ with DAG(
                 print(f"ℹ️ File {src_key} đã được archive trước đó, tiếp tục ACK SQS.")
 
             # 3. Xóa message tương ứng khỏi SQS (At-Least-Once Delivery -> Idempotent Consumer)
-            _delete_sqs_handles(
+            failed_handles = _delete_sqs_handles(
                 sqs_client,
                 item.get("receipt_handles", []),
                 filename,
+            )
+            if failed_handles:
+                failed_acks.append(f"{filename} ({len(failed_handles)} handles)")
+
+        if failed_acks:
+            raise RuntimeError(
+                f"SQS ACK thất bại sau khi archive: {', '.join(failed_acks)}. "
+                "Cho phép Airflow retry task để hoàn tất ACK."
             )
 
         print(

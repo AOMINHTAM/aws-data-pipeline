@@ -1,0 +1,90 @@
+name: CI — AWS Data Pipeline Verification
+
+on:
+  push:
+    branches:
+      - main
+      - "feat/**"
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  # Job 1: Kiểm tra cú pháp Python, lint (Ruff) và chạy toàn bộ Unit Tests (chỉ mất ~15s)
+  lint-and-unit-tests:
+    name: Python Lint & Unit Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install Ruff linter
+        run: python -m pip install --upgrade pip ruff
+
+      - name: Run Ruff static analysis
+        run: ruff check dags/ include/ scripts/ tests/
+
+      - name: Verify Python bytecode compilation
+        run: |
+          python -m py_compile \
+            dags/ecommerce_pipeline_dag.py \
+            dags/ecommerce_weekly_full_refresh_dag.py \
+            include/ingestion_guards.py \
+            include/sqs_parser.py \
+            scripts/export_to_csv.py
+
+      - name: Run Python unit tests
+        run: python -m unittest discover -s tests -p "test_*.py" -v
+
+  # Job 2: Kiểm tra parse toàn bộ mô hình dbt, sources và schema tests (offline, $0 AWS)
+  dbt-parse-validation:
+    name: dbt Parse & Schema Validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dbt-redshift
+        run: python -m pip install --upgrade pip dbt-redshift
+
+      - name: Parse dbt project & validate SQL/YAML graphs (offline)
+        env:
+          DBT_REDSHIFT_PASSWORD: ci_dummy_password_no_aws_call
+        run: dbt parse --project-dir dbt --profiles-dir dbt
+
+  # Job 3: Build Astro Docker Runtime 3.3 và kiểm thử import Airflow 3 DAG + Cosmos
+  airflow-dag-validation:
+    name: Astro Docker Build & Airflow DAG Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build Astro Airflow 3.3 runtime image
+        run: docker build -t aws-data-pipeline-ci:latest .
+
+      - name: Initialize local Airflow SQLite DB & test DAG imports
+        env:
+          DBT_REDSHIFT_PASSWORD: ci_dummy_password_no_aws_call
+        run: |
+          docker run --rm \
+            -e AIRFLOW_HOME=/usr/local/airflow \
+            -e AIRFLOW__CORE__LOAD_EXAMPLES=False \
+            -e DBT_REDSHIFT_PASSWORD="${DBT_REDSHIFT_PASSWORD}" \
+            aws-data-pipeline-ci:latest \
+            bash -c "airflow db migrate && airflow dags list-import-errors && (python -m pip show pytest >/dev/null 2>&1 || python -m pip install --no-cache-dir --quiet pytest) && pytest -v tests/dags/test_dag_example.py"

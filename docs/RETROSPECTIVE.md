@@ -63,7 +63,7 @@ Extracted analytical datasets stored locally in [`exports/`](../exports/) (git-i
 ### 2. Core Engineering Takeaways
 * **Dimensional Modeling (Kimball Star Schema):** Structured a 3-layer Medallion architecture (`raw_data` Bronze → `public_staging` Silver views → `public_marts` Gold incremental & dimension tables) guarded by 9 automated dbt quality tests.
 * **Pure Event-Driven Scheduling (Airflow 3 `AssetWatcher`):** Transitioned from periodic bucket scanning (`S3KeySensor`) → 5-min `SqsSensor` micro-batch → native Airflow 3 `AssetWatcher` (`SqsSensorTrigger` Long Polling `20s`), spawning **0 empty DAG runs** while keeping `VisibilityTimeout=900s` & `At-Least-Once Delivery` intact.
-* **Cloud FinOps Mindset:** Minimized Redshift Serverless (4 RPUs) cost: idle Triggerer creates **0 DAG runs**, `s3_hook.check_for_key()` prevents waking Redshift on duplicate SQS deliveries, `ecommerce_dbt_full_refresh_maintenance` starts paused (`is_paused_upon_creation=True`), and `astro dev stop` reduces ongoing AWS polling/compute to **\$0.00**.
+* **Cloud FinOps Mindset:** Minimized Redshift Serverless (4 RPUs) compute cost: idle Triggerer creates **0 DAG runs** (zero idle RPU wakeups), SQS Long Polling (~104k requests/month if left active) stays well within the 1M/month AWS Free Tier allowance *(persistent storage costs excluded)*, `s3_hook.check_for_key()` prevents waking Redshift on duplicate SQS deliveries, `ecommerce_dbt_full_refresh_maintenance` starts paused (`is_paused_upon_creation=True`), and `astro dev stop` halts Airflow SQS polling completely.
 
 ---
 
@@ -101,17 +101,18 @@ flowchart LR
 4. Upgraded [`dags/ecommerce_pipeline_dag.py`](../dags/ecommerce_pipeline_dag.py) to **Airflow 3 `Asset` + `AssetWatcher` (`SqsSensorTrigger`)** removing the `*/5` cron completely, wrapped Redshift ingestion in an atomic `TEMP TABLE` + `DELETE/INSERT` transaction (`autocommit=False`), added an optional paused-by-default reconciliation DAG [`dags/ecommerce_weekly_full_refresh_dag.py`](../dags/ecommerce_weekly_full_refresh_dag.py), and added modular [`include/sqs_parser.py`](../include/sqs_parser.py) + [`tests/test_sqs_parser.py`](../tests/test_sqs_parser.py) (`7/7` unit tests passing).
 
 #### 2. Under-the-Hood Mechanism
-* **Event-Driven Long Polling (Zero Time Cron) & Zero S3 `LIST` Overhead:** S3 emits event metadata (`Records[0].s3.object.key`) within 1–2 seconds into SQS. Airflow 3's Triggerer listens asynchronously via SQS Long Polling (`wait_time_seconds=20`, `waiter_delay=5`), waking the DAG immediately upon arrival with zero skipped cron clutter — and stops completely (**\$0.00 AWS cost**) when `astro dev stop` runs.
-* **Visibility Timeout (`900s`), Idempotent S3 Guard & Atomic Cleanup Ordering:**
+* **Event-Driven Long Polling (Zero Time Cron) & Zero S3 `LIST` Overhead:** S3 emits event metadata (`Records[0].s3.object.key`) into SQS (typically within seconds per S3 Event Notification SLA). Airflow 3's Triggerer listens asynchronously via SQS Long Polling (`wait_time_seconds=20`, `waiter_delay=5`), waking the DAG on arrival without scheduled cron clutter — and stops SQS polling completely when `astro dev stop` runs.
+* **Visibility Timeout (`900s`), Empty-Stage Guard & Atomic Cleanup Ordering:**
   * `SqsSensorTrigger` sets `delete_message_on_reception=False` with `VisibilityTimeout=900s` (15 minutes).
-  * `load_raw_from_sqs` checks `s3_hook.check_for_key()` before touching Redshift (safely acknowledging duplicate deliveries) and uses `CREATE TEMP TABLE` + `COPY` + `DELETE/INSERT` (`autocommit=False`) so failed loads never truncate `raw_data`.
-  * Messages are deleted (`delete_message` via `ReceiptHandle`) **only after** dbt 9/9 tests pass, S3 files are archived to `archive/`, and `raw/` objects are removed.
+  * `load_raw_from_sqs` checks `s3_hook.check_for_key()` before touching Redshift, stages into `TEMP TABLE`, enforces [`ensure_non_empty_stage`](../include/ingestion_guards.py) (`staged_rows > 0`) so empty CSVs cannot wipe target tables, and executes per-table `DELETE/INSERT` (`autocommit=False`).
+  * Messages are deleted (`delete_message` via `ReceiptHandle`) **only after** dbt tests pass, S3 files are archived to `archive/`, and `raw/` objects are removed (raising on ACK error for Airflow task retry).
 
-#### 3. Step 1 Live Verification Results
+#### 3. Step 1 Live Verification Results *(Initial `SqsSensor` Baseline)*
 > [!NOTE]
-> **Status:** ✅ **100% PASS (LIVE VERIFIED ON AWS & AIRFLOW 3)**
+> **Status:** ✅ **100% PASS (LIVE VERIFIED ON AWS & AIRFLOW 3 — INITIAL `SqsSensor` BASELINE)**
+> *(Note: Runs `14:20:00` and `14:25:00` below were captured when Step 1 initially used `SqsSensor` on a 5-minute schedule prior to refactoring the trigger to `AssetWatcher` with zero empty runs.)*
 > - **Run `14:20:00` (Happy Path):** SQS delivered `product_category_name_translation.csv` event → Airflow refreshed Redshift → dbt passed 9/9 tests → archived CSV to `archive/20261113_072547/` → executed `✉️ SQS ACK` to delete the queue message.
-> - **Run `14:25:00` (FinOps Zero-Cost):** Empty SQS queue timed out cleanly at 45s (`soft_fail=True`) and transitioned downstream tasks to **`SKIPPED`** (\$0 Redshift RPU).
+> - **Run `14:25:00` (FinOps Skip):** Empty SQS queue timed out cleanly at 45s (`soft_fail=True`) and transitioned downstream tasks to **`SKIPPED`** (zero Redshift RPU compute).
 > - **Live Evidence Screenshots:**
 >   - V4 DAG Graph: [`images/airflow_v4_dag_graph.png`](../images/airflow_v4_dag_graph.png)
 >   - Grid View (Event Run vs. FinOps Skip): [`images/airflow_v4_grid_event_driven.png`](../images/airflow_v4_grid_event_driven.png)
