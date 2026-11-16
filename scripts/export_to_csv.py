@@ -99,6 +99,7 @@ QUERIES = {
                 o.total_items,
                 o.total_item_value,
                 o.total_freight_value,
+                o.total_order_cost,
                 o.total_payment_value,
                 o.primary_payment_type,
                 o.max_installments,
@@ -106,6 +107,7 @@ QUERIES = {
                 o.estimated_delivery_duration_days,
                 o.delay_days,
                 o.is_delayed,
+                o.delivery_status,
                 o.review_score
             FROM public_marts.fct_orders o
             LEFT JOIN public_marts.dim_customers c
