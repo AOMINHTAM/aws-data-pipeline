@@ -26,4 +26,8 @@ upload-data:
 	@./scripts/upload_to_s3.sh $(BUCKET)
 
 export-data:
-	@python3 scripts/export_to_csv.py
+	@if [ -x "./venv/bin/python" ]; then \
+		./venv/bin/python scripts/export_to_csv.py; \
+	else \
+		python3 scripts/export_to_csv.py; \
+	fi
