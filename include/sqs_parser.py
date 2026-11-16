@@ -114,3 +114,59 @@ def parse_sqs_s3_events(
                     files_by_name[filename]["receipt_handles"].append(receipt_handle)
 
     return list(files_by_name.values()), test_event_handles
+
+
+def extract_messages_from_asset_events(triggering_asset_events: Any) -> list[dict[str, Any]]:
+    """
+    Trích xuất danh sách SQS message dictionaries từ context['triggering_asset_events']
+    do Airflow 3 AssetWatcher (SqsSensorTrigger) truyền vào DAG run.
+
+    Bỏ qua các event báo lỗi (status='error') để không đánh thức Redshift ngoài ý muốn.
+    """
+    if not isinstance(triggering_asset_events, dict):
+        return []
+
+    messages: list[dict[str, Any]] = []
+    for events in triggering_asset_events.values():
+        if not isinstance(events, (list, tuple)):
+            continue
+        for asset_event in events:
+            extra = getattr(asset_event, "extra", None)
+            if extra is None and isinstance(asset_event, dict):
+                extra = asset_event.get("extra")
+            if not isinstance(extra, dict):
+                continue
+
+            payload = extra.get("payload", extra)
+            if not isinstance(payload, dict):
+                continue
+
+            if payload.get("status") == "error":
+                continue
+
+            batch = payload.get("message_batch") or payload.get("messages") or []
+            if isinstance(batch, list):
+                messages.extend(msg for msg in batch if isinstance(msg, dict))
+
+    return messages
+
+
+def deduplicate_sqs_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Loại bỏ các SQS message trùng lặp theo ReceiptHandle / MessageId khi gộp từ nhiều nguồn."""
+    unique_messages: list[dict[str, Any]] = []
+    seen_keys: set[str] = set()
+
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        dedup_key = (
+            msg.get("ReceiptHandle")
+            or msg.get("MessageId")
+            or json.dumps(msg, sort_keys=True, default=str)
+        )
+        if dedup_key in seen_keys:
+            continue
+        seen_keys.add(dedup_key)
+        unique_messages.append(msg)
+
+    return unique_messages

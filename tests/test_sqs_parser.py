@@ -5,7 +5,12 @@ Unit tests kiểm thử logic phân tích cú pháp SQS Message và định tuy�
 
 import json
 import unittest
-from include.sqs_parser import parse_sqs_s3_events
+from types import SimpleNamespace
+from include.sqs_parser import (
+    deduplicate_sqs_messages,
+    extract_messages_from_asset_events,
+    parse_sqs_s3_events,
+)
 
 
 class TestSqsParser(unittest.TestCase):
@@ -170,6 +175,35 @@ class TestSqsParser(unittest.TestCase):
         )
         self.assertEqual(len(valid_files), 0)
         self.assertEqual(len(test_handles), 0)
+
+    def test_extract_messages_from_asset_events_and_deduplicate(self):
+        sqs_msg = {
+            "MessageId": "msg-1",
+            "ReceiptHandle": "rh-1",
+            "Body": json.dumps({
+                "Records": [
+                    {
+                        "eventSource": "aws:s3",
+                        "eventName": "ObjectCreated:Put",
+                        "s3": {"object": {"key": "raw/olist_orders_dataset.csv"}},
+                    }
+                ]
+            }),
+        }
+        error_event = SimpleNamespace(
+            extra={"payload": {"status": "error", "message": "transient network error"}}
+        )
+        valid_event = SimpleNamespace(
+            extra={"payload": {"status": "success", "message_batch": [sqs_msg]}}
+        )
+
+        extracted = extract_messages_from_asset_events({"asset": [error_event, valid_event]})
+        self.assertEqual(len(extracted), 1)
+        self.assertEqual(extracted[0]["ReceiptHandle"], "rh-1")
+
+        # Gộp cùng message nhận trực tiếp từ SQS -> không bị nhân đôi
+        deduped = deduplicate_sqs_messages(extracted + [dict(sqs_msg)])
+        self.assertEqual(len(deduped), 1)
 
 
 if __name__ == "__main__":

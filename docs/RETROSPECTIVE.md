@@ -56,14 +56,14 @@ Extracted analytical datasets stored locally in [`exports/`](../exports/) (git-i
 
 ### 1. Real-World Technical Challenges Solved
 * **Network & Redshift Serverless Connectivity (Port `5439`):** Diagnosed and resolved Cloudflare WARP blocking direct SSL connections from local/Docker containers to Redshift Serverless, as well as a Power BI connector crash triggered when appending `:5439` directly in the Server input field.
-* **Idempotent Ingestion (Preventing Row Duplication):** Fixed 4x row duplication caused by repeated `COPY` runs by standardizing an atomic per-table `TRUNCATE TABLE` + `COPY` workflow coupled with lifecycle movement (`raw/` → `archive/<timestamp>/`).
-* **Ubuntu WSL2, Docker & Astro Runtime 3.3:** Configured WSL2 filesystem permissions, isolated secrets in `.env` (`AIRFLOW_CONN_AWS_DEFAULT=aws://`), and mastered Astro CLI dynamic UI ports and scheduler behaviors.
-* **SQS Event-Driven Edge Cases (V4):** Handled `s3:TestEvent` payloads (which lack the `Records` key when S3 notifications are first enabled) to prevent `KeyError`, and set `delete_message_on_reception=False` on `SqsSensor` so messages remain protected by `VisibilityTimeout` until dbt tests pass.
+* **Idempotent & Atomic Ingestion (Temp-Stage Swap vs. Redshift `TRUNCATE`):** Replaced naive `autocommit=True` `TRUNCATE + COPY` (where `TRUNCATE` auto-commits in Redshift and cannot roll back if `COPY` fails) with staging into a `TEMP TABLE` via `COPY` followed by an explicit `autocommit=False` `DELETE + INSERT` swap transaction and S3 duplicate-delivery guard (`check_for_key`).
+* **Ubuntu WSL2, Docker & Astro Runtime 3.3:** Configured WSL2 filesystem permissions, isolated secrets in `.env` (`AIRFLOW_CONN_AWS_DEFAULT=aws://`), and mastered Airflow 3.3 (`astrocrpublic.azurecr.io/runtime:3.3-11`) Task SDK (`Asset`, `AssetWatcher`).
+* **SQS Event-Driven Edge Cases (V4):** Handled `s3:TestEvent` payloads (which lack the `Records` key when S3 notifications are first enabled), configured `AssetWatcher` with `SqsSensorTrigger` (SQS Long Polling `20s`, **zero `*/5` cron**), raised `VisibilityTimeout` to `900s`, ordered S3 archive/cleanup before SQS ACK, and added an optional paused-by-default weekly full-refresh DAG for >3-day late-arriving data.
 
 ### 2. Core Engineering Takeaways
-* **Dimensional Modeling (Kimball Star Schema):** Structured a 3-layer Medallion architecture (`raw_data` Bronze → `public_staging` Silver views → `public_marts` Gold physical tables) guarded by 9 automated dbt quality tests.
-* **Pull vs. Push Event-Driven Architecture:** Transitioned from periodic bucket scanning (`S3KeySensor`) to instant push-based notifications (`S3 ObjectCreated` → `AWS SQS` → `Airflow SqsSensor`), decoupling storage from compute via `VisibilityTimeout` and `At-Least-Once Delivery`.
-* **Cloud FinOps Mindset:** Minimized Redshift Serverless (4 RPUs) cost using `soft_fail=True` (zero compute wake-up on empty queue polls) and decoupled offline BI exports.
+* **Dimensional Modeling (Kimball Star Schema):** Structured a 3-layer Medallion architecture (`raw_data` Bronze → `public_staging` Silver views → `public_marts` Gold incremental & dimension tables) guarded by 9 automated dbt quality tests.
+* **Pure Event-Driven Scheduling (Airflow 3 `AssetWatcher`):** Transitioned from periodic bucket scanning (`S3KeySensor`) → 5-min `SqsSensor` micro-batch → native Airflow 3 `AssetWatcher` (`SqsSensorTrigger` Long Polling `20s`), spawning **0 empty DAG runs** while keeping `VisibilityTimeout=900s` & `At-Least-Once Delivery` intact.
+* **Cloud FinOps Mindset:** Minimized Redshift Serverless (4 RPUs) cost: idle Triggerer creates **0 DAG runs**, `s3_hook.check_for_key()` prevents waking Redshift on duplicate SQS deliveries, `ecommerce_dbt_full_refresh_maintenance` starts paused (`is_paused_upon_creation=True`), and `astro dev stop` reduces ongoing AWS polling/compute to **\$0.00**.
 
 ---
 
@@ -98,14 +98,14 @@ flowchart LR
 1. Created Standard SQS Queue: `olist-s3-raw-arrival-queue` (`us-east-1`, \$0 within AWS Free Tier of 1M requests/month).
 2. Attached a **Resource-based Queue Policy** granting `s3.amazonaws.com` `sqs:SendMessage` permission restricted by `aws:SourceArn` (`arn:aws:s3:::olist-raw-data-amt-us-east-1-205506434601-us-east-1-an`) and `aws:SourceAccount`.
 3. Enabled **S3 Bucket Notification Configuration** listening to `s3:ObjectCreated:*` filtered by `prefix = raw/` and `suffix = .csv`.
-4. Upgraded [`dags/ecommerce_pipeline_dag.py`](../dags/ecommerce_pipeline_dag.py) and added modular [`include/sqs_parser.py`](../include/sqs_parser.py) + [`tests/test_sqs_parser.py`](../tests/test_sqs_parser.py) (6/6 unit tests passing).
+4. Upgraded [`dags/ecommerce_pipeline_dag.py`](../dags/ecommerce_pipeline_dag.py) to **Airflow 3 `Asset` + `AssetWatcher` (`SqsSensorTrigger`)** removing the `*/5` cron completely, wrapped Redshift ingestion in an atomic `TEMP TABLE` + `DELETE/INSERT` transaction (`autocommit=False`), added an optional paused-by-default reconciliation DAG [`dags/ecommerce_weekly_full_refresh_dag.py`](../dags/ecommerce_weekly_full_refresh_dag.py), and added modular [`include/sqs_parser.py`](../include/sqs_parser.py) + [`tests/test_sqs_parser.py`](../tests/test_sqs_parser.py) (`7/7` unit tests passing).
 
 #### 2. Under-the-Hood Mechanism
-* **Zero Polling Latency & Zero S3 `LIST` Overhead:** S3 emits event metadata (`Records[0].s3.object.key`) within 1–2 seconds directly into SQS, eliminating expensive bucket listing scans.
-* **Visibility Timeout & At-Least-Once Delivery:**
-  * `SqsSensor` sets `delete_message_on_reception=False` with `VisibilityTimeout=300s`.
-  * Messages are deleted (`delete_message` via `ReceiptHandle`) **only after** Redshift COPY, dbt models, 9/9 tests, and S3 archiving all succeed.
-  * If any step fails mid-run, the message automatically becomes visible again after 300 seconds for fault-tolerant retry.
+* **Event-Driven Long Polling (Zero Time Cron) & Zero S3 `LIST` Overhead:** S3 emits event metadata (`Records[0].s3.object.key`) within 1–2 seconds into SQS. Airflow 3's Triggerer listens asynchronously via SQS Long Polling (`wait_time_seconds=20`, `waiter_delay=5`), waking the DAG immediately upon arrival with zero skipped cron clutter — and stops completely (**\$0.00 AWS cost**) when `astro dev stop` runs.
+* **Visibility Timeout (`900s`), Idempotent S3 Guard & Atomic Cleanup Ordering:**
+  * `SqsSensorTrigger` sets `delete_message_on_reception=False` with `VisibilityTimeout=900s` (15 minutes).
+  * `load_raw_from_sqs` checks `s3_hook.check_for_key()` before touching Redshift (safely acknowledging duplicate deliveries) and uses `CREATE TEMP TABLE` + `COPY` + `DELETE/INSERT` (`autocommit=False`) so failed loads never truncate `raw_data`.
+  * Messages are deleted (`delete_message` via `ReceiptHandle`) **only after** dbt 9/9 tests pass, S3 files are archived to `archive/`, and `raw/` objects are removed.
 
 #### 3. Step 1 Live Verification Results
 > [!NOTE]

@@ -8,7 +8,7 @@
 
 An enterprise-grade, **pure event-driven ELT Data Pipeline** built on the **Modern Data Stack (MDS)** using **AWS (S3, SQS & Redshift Serverless)**, **dbt Core**, and **Apache Airflow 3 (via Astro CLI & Astronomer Cosmos)**.
 
-Upgraded from a manual V2 baseline directly into a resilient **V4 Push-Based Event-Driven & Incremental ELT Architecture**: Amazon S3 automatically pushes `s3:ObjectCreated:*` events into an **AWS SQS Queue** (`olist-s3-raw-arrival-queue`), Airflow 3 senses incoming messages via `SqsSensor` with **Zero Polling Latency**, skips downstream warehouse compute when the queue is empty (**\$0 Redshift RPU cost**), idempotently reloads **Amazon Redshift Serverless**, runs **dbt Incremental Modeling** (`delete+insert` with a 3-day lookback window on `fct_orders` and `dim_customers`) alongside **9/9 dbt quality tests**, archives processed CSVs, and safely **ACKs (deletes) SQS messages** with **At-Least-Once Delivery** guarantees.
+Upgraded from a manual V2 baseline directly into a resilient **V4 Push-Based Event-Driven & Incremental ELT Architecture**: Amazon S3 automatically pushes `s3:ObjectCreated:*` events into an **AWS SQS Queue** (`olist-s3-raw-arrival-queue`), Airflow 3's async Triggerer listens via **Airflow `Asset` + `AssetWatcher` (`SqsSensorTrigger` Long Polling 20s)** with **zero time-based cron (`*/5` eliminated)**, triggers the DAG **immediately upon file arrival** (spawning **0 empty runs** when idle and incurring **\$0 AWS cost** when containers are stopped), loads Redshift via an **atomic `TEMP TABLE` + `DELETE/INSERT` transaction**, runs **dbt Incremental Modeling** (`delete+insert` with a 3-day lookback window on `fct_orders` and `dim_customers`) alongside **9/9 dbt quality tests**, archives processed CSVs, and safely **ACKs (deletes) SQS messages** with **Idempotent At-Least-Once Delivery** guarantees.
 
 ---
 
@@ -39,21 +39,23 @@ Upgraded from a manual V2 baseline directly into a resilient **V4 Push-Based Eve
 
 | Architectural Dimension | V2 (Manual / Batch Baseline) | V4 (Pure Push Event-Driven Architecture) |
 | :--- | :--- | :--- |
-| **Trigger Mechanism** | Manual UI trigger (`schedule=None`) | **Push-based Event Notification**: File upload to S3 pushes JSON payload directly to **AWS SQS** within seconds. |
-| **Trigger Latency** | Manual intervention required | **Zero Polling Latency**: Airflow `SqsSensor` inspects SQS queue directly on a 5-min cadence (`*/5 * * * *`). |
+| **Trigger Mechanism** | Manual UI trigger (`schedule=None`) | **Push Notification + Airflow 3 `AssetWatcher`**: File upload to S3 pushes JSON payload directly to **AWS SQS** in `< 1s`, waking Airflow Triggerer automatically via `SqsSensorTrigger`. |
+| **Scheduling & Latency** | Manual intervention required | **Zero Time Cron (`schedule=[sqs_raw_arrival_asset]`)**: Replaces periodic `*/5` DAG runs with async **SQS Long Polling (`20s`)** inside Triggerer; wakes immediately upon arrival with zero wasted worker slots. |
 | **S3 API Overhead** | Required heavy `LIST` calls on entire S3 bucket | **Zero `LIST` Overhead**: Event messages contain exact object keys (`Records[0].s3.object.key`). |
-| **Fault Tolerance & Reliability** | Direct coupled execution: error midway caused silent failure | **Decoupled with SQS Visibility Timeout (300s)**: Messages remain safe in queue and are only deleted after Redshift COPY + dbt 9/9 tests pass. Network/compute failures allow automatic redelivery. |
-| **Data Ingestion (S3 → DWH)** | Static manual SQL script (`copy_raw_tables.sql`) | Dynamic `@task load_raw_from_sqs`: Modular parser, URL unquoting, deduplication, and atomic `TRUNCATE + COPY`. |
-| **FinOps Cost Optimization** | Full pipeline runs on trigger | `SqsSensor` with `soft_fail=True` (timeout 45s): Empty queue marks `SKIPPED` (**\$0 Redshift RPU cost**). |
-| **Data Lifecycle & SQS ACK** | Files lingered indefinitely in `raw/` | `@task archive_and_ack_sqs_messages`: S3 archive (`raw/` → `archive/<timestamp>/`) + atomic SQS Message Deletion (`delete_message`). |
-| **Data Modeling & Governance** | Basic tables / manual full rebuilds | Multi-layered Medallion Kimball Star Schema via **Astronomer Cosmos** with **Incremental Marts (`delete+insert`, 3-day lookback)** on `fct_orders` & `dim_customers` + 9 automated dbt tests. |
+| **Fault Tolerance & Reliability** | Direct coupled execution: error midway caused silent failure | **Decoupled with `VisibilityTimeout=900s` & S3 Guard**: Duplicate SQS deliveries are safely filtered via `s3_hook.check_for_key()`; messages are ACK'd only after Redshift + dbt 9/9 tests + S3 cleanup succeed. |
+| **Data Ingestion (S3 → DWH)** | Static manual SQL script (`copy_raw_tables.sql`) | **Atomic Staging Swap (`autocommit=False`)**: Stages CSVs into a Redshift `TEMP TABLE` via `COPY` first, then swaps into `raw_data` inside a rollback-safe `DELETE + INSERT` transaction (avoiding Redshift's auto-committing `TRUNCATE` trap). |
+| **FinOps Cost Optimization** | Full pipeline runs on trigger | **Zero Idle Runs & \$0 When Stopped**: Empty SQS creates **0 DAG runs** (zero Redshift wake-ups), Long Polling stays inside AWS Free Tier (1M req/mo), and stopping Astro (`astro dev stop`) produces **\$0.00 AWS cost**. |
+| **Data Lifecycle & SQS ACK** | Files lingered indefinitely in `raw/` | `@task archive_and_ack_sqs_messages`: Copies `raw/` → `archive/<ts>/`, cleans `raw/`, and **only then** deletes the SQS message (`DeleteMessage`). |
+| **Data Modeling & Governance** | Basic tables / manual full rebuilds | Multi-layered Medallion Kimball Star Schema via **Astronomer Cosmos** with **Incremental Marts (`delete+insert`, 3-day lookback)** on `fct_orders` & `dim_customers`, 9 automated dbt tests, and a paused-by-default weekly full-refresh reconciliation DAG. |
 
 ---
 
 ## 📸 Pipeline Observability & Live Verification Results
 
 ### 1. V4 Event-Driven Airflow DAG Graph
-Orchestration workflow: `start_pipeline` → `wait_for_sqs_messages` (`SqsSensor`) → `load_raw_from_sqs` (`@task`) → `dbt_transformation_and_tests` (`DbtTaskGroup`) → `archive_and_ack_sqs_messages` (`@task`) → `end_pipeline`:
+Current hardened DAG workflow (`schedule=[sqs_raw_arrival_asset]`, zero time cron): `AssetWatcher (Triggerer)` → `start_pipeline` → `load_raw_from_sqs` (`@task`, Atomic Temp-Stage Swap) → `dbt_transformation_and_tests` (`DbtTaskGroup`) → `archive_and_ack_sqs_messages` (`@task`) → `end_pipeline`.
+
+*(Screenshot below captured initial V4 Step 1 live verification with `SqsSensor`; subsequently upgraded to Airflow 3 `AssetWatcher` with zero cron runs):*
 
 ![Airflow V4 Event-Driven DAG Graph](images/airflow_v4_dag_graph.png)
 
@@ -92,14 +94,15 @@ Dependency lineage from 9 `raw_data` sources through 7 `public_staging` views in
 
 ## 💡 Key Engineering Highlights & Best Practices
 
-### 1. Pure Event-Driven Ingestion with AWS S3 & SQS (New in V4)
-* **Decoupled Architecture:** Storage (Amazon S3) is decoupled from Orchestration (Airflow) through **Amazon SQS**. If Airflow containers are stopped for maintenance, S3 events buffer safely in SQS for up to 4 days.
+### 1. Event-Driven Ingestion with AWS S3, SQS & Airflow 3 `AssetWatcher` (V4)
+* **True Asset-Based Triggering (Zero Time Cron):** Uses Airflow 3 `Asset` + `AssetWatcher` backed by `SqsSensorTrigger` (`wait_time_seconds=20` SQS Long Polling) instead of a fixed cron schedule (`*/5`). When idle, **no empty DAG runs are spawned** and Redshift stays asleep; stopping Astro (`astro dev stop`) halts all requests (**\$0.00 AWS cost**).
 * **Resource-Based Queue Policy:** Configured secure IAM resource policy on SQS granting `sqs:SendMessage` strictly to `s3.amazonaws.com` constrained by `aws:SourceArn` and `aws:SourceAccount`.
-* **Fault-Tolerant At-Least-Once Delivery:** Airflow reads messages with `delete_message_on_reception=False` and a `VisibilityTimeout=300s`. Messages are deleted from SQS **only after** dbt models and 9/9 data tests succeed. Any downstream failure leaves the message in SQS for automatic retry.
-* **Modular Parser & Unit Testing:** Event parsing logic is isolated in [`include/sqs_parser.py`](include/sqs_parser.py) with automated unit tests in [`tests/test_sqs_parser.py`](tests/test_sqs_parser.py) covering test events, deduplication, and URL-decoding.
+* **Atomic Redshift Staging Swap:** Redshift's `TRUNCATE` auto-commits and cannot be rolled back if `COPY` fails. To guarantee zero data loss, `load_raw_from_sqs` stages files into a `TEMP TABLE` via `COPY` first, then executes `DELETE + INSERT` inside an explicit `autocommit=False` transaction.
+* **Idempotent Consumer & `VisibilityTimeout=900s`:** `delete_message_on_reception=False` protects messages for 15 minutes while dbt runs; `s3_hook.check_for_key()` prevents re-loading duplicate SQS deliveries, and SQS messages are ACK'd **only after** `archive/` copy, `raw/` cleanup, and 9/9 dbt tests succeed.
+* **Modular Parser & Unit Testing:** Event parsing, AssetWatcher extraction, and deduplication live in [`include/sqs_parser.py`](include/sqs_parser.py) with unit tests in [`tests/test_sqs_parser.py`](tests/test_sqs_parser.py) (`7/7` passing).
 
 ### 2. Cloud Infrastructure & FinOps (Cost-Optimization)
-* **Amazon Redshift Serverless (4 RPUs):** Base capacity scales down to \$0 when idle; with V4's `SqsSensor` skip gate, empty queue polls never wake Redshift.
+* **Amazon Redshift Serverless (4 RPUs):** Base capacity scales down to \$0 when idle; `AssetWatcher` only wakes Redshift when valid Olist `.csv` events exist on `s3://.../raw/` (plus an optional `ecommerce_dbt_full_refresh_maintenance` DAG created **paused by default** to guarantee \$0 unexpected spend).
 * **AWS Budgets:** Strict budget guardrail alert at \$5/month.
 * **Decoupled BI Extraction:** [`scripts/export_to_csv.py`](scripts/export_to_csv.py) extracts clean marts to local CSVs (`exports/`), enabling offline Power BI dashboarding without Redshift RPU consumption.
 
@@ -126,7 +129,8 @@ Dependency lineage from 9 `raw_data` sources through 7 `public_staging` views in
 aws_data_pipeline/
 ├── .astro/                         # Astro CLI project settings
 ├── dags/
-│   └── ecommerce_pipeline_dag.py   # V4 Event-Driven Airflow DAG (SqsSensor -> COPY -> Cosmos dbt -> Archive & ACK)
+│   ├── ecommerce_pipeline_dag.py             # V4 True Event-Driven Airflow DAG (AssetWatcher -> Temp Stage Swap -> Cosmos dbt -> Archive & ACK)
+│   └── ecommerce_weekly_full_refresh_dag.py  # Optional weekly dbt --full-refresh DAG (paused by default for $0 FinOps)
 ├── dbt/
 │   ├── dbt_project.yml             # dbt project configuration & materializations
 │   ├── profiles.yml                # Redshift connection profile with env variables
@@ -141,7 +145,7 @@ aws_data_pipeline/
 ├── tests/
 │   ├── dags/
 │   │   └── test_dag_example.py     # Pytest DAG validation (imports, tags, retries >= 2)
-│   └── test_sqs_parser.py          # Unit tests for SQS event parsing (6/6 passing)
+│   └── test_sqs_parser.py          # Unit tests for SQS + AssetWatcher event parsing (7/7 passing)
 ├── data/                           # Olist CSV files (git-ignored)
 ├── exports/                        # Clean analytics CSV exports for Power BI (git-ignored)
 ├── images/
@@ -162,7 +166,7 @@ aws_data_pipeline/
 ├── .gitignore
 ├── Dockerfile                      # Astronomer Runtime 3.3 Dockerfile
 ├── Makefile                        # Automation shortcuts (verify, upload, export)
-└── requirements.txt                # Python dependencies (cosmos, dbt-redshift, airflow-providers-amazon)
+└── requirements.txt                # Python dependencies (cosmos, dbt-redshift, apache-airflow-providers-amazon[aiobotocore])
 ```
 
 ---
@@ -176,9 +180,9 @@ aws_data_pipeline/
 | **Message Queue** | Amazon SQS (`olist-s3-raw-arrival-queue`) | Decoupled event buffering & push notifications |
 | **Data Warehouse** | Amazon Redshift Serverless (4 RPUs) | Scalable MPP Cloud Data Warehouse |
 | **Transformation** | dbt Core (`dbt-redshift`) | SQL Transformation, Kimball Star Schema & 9/9 Tests |
-| **Orchestration** | Apache Airflow 3 (Astro CLI) | Event-driven scheduling (`*/5`), `SqsSensor`, TaskFlow `@task` |
+| **Orchestration** | Apache Airflow 3 (Astro CLI) | Native `Asset` + `AssetWatcher` (`SqsSensorTrigger` Long Polling 20s, zero time cron) & TaskFlow `@task` |
 | **Integration** | Astronomer Cosmos | Native dbt-to-Airflow TaskGroup mapping |
-| **AWS Integration** | `apache-airflow-providers-amazon` & `redshift-connector` | SQS/S3 hooks & SSL Redshift `TRUNCATE + COPY` |
+| **AWS Integration** | `apache-airflow-providers-amazon[aiobotocore]` & `redshift-connector` | Async SQS Triggerer, S3 hooks & atomic `TEMP TABLE` staging swap |
 | **Containerization** | Docker / Docker Compose | Containerized Airflow runtime |
 | **Data Export & BI** | Python (`redshift-connector`, `pandas`) & Power BI | Cost-optimized mart extraction & analytics |
 | **OS / Shell** | Ubuntu (WSL2) + Bash | Linux development environment |
@@ -220,10 +224,11 @@ aws_data_pipeline/
    astro dev start
    ```
 2. Open the Airflow Web UI (e.g. `http://localhost:8080`) and locate DAG **`ecommerce_aws_data_pipeline`**.
+* **Dry-Run & No Time Cron Needed:** Ensure Airflow `trigger_pipeline` (`AssetWatcher`) is running; no scheduled 5-minute empty runs will clutter your UI.
 3. Drop Olist CSV files into `s3://<your-s3-bucket-name>/raw/`:
    * Amazon S3 pushes an `ObjectCreated` event to Amazon SQS in `< 1s`.
-   * Airflow's `SqsSensor` consumes the message, runs idempotent `TRUNCATE + COPY` into Redshift, executes dbt models & tests, moves files to `archive/<timestamp>/`, and ACKs (deletes) the SQS message.
-   * If no files land in S3, Airflow's next scheduled poll skips cleanly without waking Redshift (**\$0 compute cost**).
+   * Airflow 3's `AssetWatcher` wakes up via SQS Long Polling (`20s`), triggers `ecommerce_aws_data_pipeline` automatically, stages files atomically into Redshift `TEMP TABLE`s (`DELETE + INSERT` transaction), runs dbt Incremental models & tests, moves files to `archive/<timestamp>/`, deletes `raw/`, and ACKs the SQS message.
+   * When finished experimenting, stop Astro (`astro dev stop`) and AWS incurs **\$0.00** (idle Redshift auto-pauses, zero SQS polls).
 
 ### 4. Export Marts for BI & Analytics
 Extract the transformed Star Schema marts into clean local CSVs in `exports/`:

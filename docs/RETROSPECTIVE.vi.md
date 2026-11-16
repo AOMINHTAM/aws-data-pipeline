@@ -115,10 +115,11 @@ flowchart LR
 1. Tạo Standard Queue trên AWS SQS: `olist-s3-raw-arrival-queue` (Region `us-east-1`, chi phí \$0 vì Free Tier miễn phí 1 triệu requests/tháng).
 2. Gắn **Resource-based Queue Policy** cho phép dịch vụ `s3.amazonaws.com` thực hiện quyền `sqs:SendMessage` từ đúng ARN của bucket `olist-raw-data-amt-us-east-1-205506434601-us-east-1-an`.
 3. Bật **S3 Bucket Notification Configuration**: Lắng nghe sự kiện `s3:ObjectCreated:*` với bộ lọc `prefix = raw/` và `suffix = .csv` để đẩy message thẳng vào SQS.
-4. Nâng cấp `dags/ecommerce_pipeline_dag.py`: Dùng `SqsSensor` (hoặc `@task` với `SqsHook`) lắng nghe queue, bóc tách chính xác danh sách `bucket_key` từ JSON payload của SQS, nạp vào Redshift, chạy dbt, archive file và xóa message khỏi queue.
+4. Nâng cấp `dags/ecommerce_pipeline_dag.py` lên **Airflow 3 `Asset` + `AssetWatcher` (`SqsSensorTrigger` Long Polling 20s)** bỏ hoàn toàn lịch cron `*/5`, nạp Redshift qua **bảng tạm `TEMP TABLE` + transaction `DELETE/INSERT` (`autocommit=False`)**, thêm DAG bảo trì [`dags/ecommerce_weekly_full_refresh_dag.py`](../dags/ecommerce_weekly_full_refresh_dag.py) mặc định **Paused** để đảm bảo \$0 chi phí khi không chạy, và chuẩn hóa module `include/sqs_parser.py` + `tests/test_sqs_parser.py` (**7/7 tests PASS**).
 
 #### 2. Mục đích — Vì sao phải làm (Why)
-* **Loại bỏ độ trễ Polling (Zero Polling Latency):** Ở V3 (`S3KeySensor` chạy mỗi 15 phút), nếu file lên S3 lúc `12:01` thì phải đợi tới `12:15` mới được xử lý. Với S3 → SQS, sự kiện được đẩy đi ngay lập tức (dưới 1–2 giây).
+* **Event-Driven thực thụ không ràng buộc Cron (`Zero Time Cron`):** Loại bỏ lịch chạy rỗng mỗi 5 phút (`SKIPPED` clutter). Triggerer lắng nghe SQS bằng AWS Long Polling (`wait_time_seconds=20`, nằm gọn trong Free Tier 1 triệu requests/tháng), và tắt hẳn **\$0.00 chi phí** khi bạn chạy `astro dev stop`.
+* **Nạp Redshift an toàn giao dịch (Atomic Staging Swap):** Trong Redshift, `TRUNCATE` tự commit ngay lập tức và **không thể `ROLLBACK`** nếu `COPY` lỗi; vì vậy bản nâng cấp stage vào `TEMP TABLE` trước rồi mới chạy `DELETE + INSERT` trong transaction `autocommit=False` để bảng `raw_data` không bao giờ bị xóa trắng.
 * **Không cần quét (List) toàn bộ S3:** Lệnh `LIST` trên S3 khi bucket có hàng trăm ngàn object rất chậm và tốn phí API. Trong khi đó, message trong SQS chứa sẵn tên file vừa tạo (`Records[0].s3.object.key`), Airflow biết chính xác cần nạp file nào mà không cần quét thư mục.
 * **Chống mất mát sự kiện (Buffering & Decoupling):** Nếu Airflow container đang bảo trì hoặc tắt, các sự kiện upload file lên S3 vẫn nằm an toàn trong hàng đợi SQS (lưu giữ tới 4–14 ngày). Khi Airflow bật lại, nó đọc hàng đợi và xử lý bù không sót một file nào!
 
@@ -137,10 +138,10 @@ flowchart LR
     ]
   }
   ```
-* **Visibility Timeout & At-Least-Once Delivery:**
-  * Khi Airflow đọc một message từ SQS (`ReceiveMessage`), message đó **chưa bị xóa ngay** mà chỉ tạm thời "tàng hình" với các worker khác trong khoảng thời gian `VisibilityTimeout` (ví dụ 300 giây).
-  * Nếu Airflow nạp Redshift + chạy dbt **thành công**, Airflow dùng `ReceiptHandle` gọi `DeleteMessage` để xóa hẳn message khỏi SQS.
-  * Nếu giữa chừng Redshift bị lỗi mạng khiến task **thất bại**, Airflow không xóa message → hết 300 giây, message tự động hiện lại trong SQS để lượt chạy sau xử lý lại. Đây chính là cơ chế đảm bảo **không bao giờ mất dữ liệu (Fault-Tolerant Message Queue)**.
+* **Visibility Timeout (`900s`), Idempotent S3 Guard & At-Least-Once Delivery:**
+  * `SqsSensorTrigger` giữ `delete_message_on_reception=False` với `VisibilityTimeout=900s` (15 phút, đủ dư cho Redshift + dbt chạy xong).
+  * `load_raw_from_sqs` kiểm tra `s3_hook.check_for_key()` trước khi mở kết nối Redshift (bỏ qua an toàn nếu SQS Standard gửi trùng message đã archive).
+  * Pipeline archive S3 → xóa file `raw/` → **cuối cùng mới** gọi `DeleteMessage` để tránh trường hợp xóa SQS xong nhưng file còn kẹt trên `raw/`.
 
 #### 4. Học được gì từ Bước 1 (Engineering Takeaways)
 * Phân biệt sâu sắc hai mô hình kiến trúc kinh điển: **Pull/Polling (`S3KeySensor`)** vs. **Push/Event-Driven (`S3 Event -> SQS`)**.
