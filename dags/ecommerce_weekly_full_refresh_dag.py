@@ -27,7 +27,7 @@ with DAG(
     is_paused_upon_creation=True,
     max_active_runs=1,
     tags=["ecommerce", "dbt", "maintenance", "full-refresh", "finops", "v4"],
-) as dag:
+):
 
     start_maintenance = EmptyOperator(task_id="start_maintenance")
 

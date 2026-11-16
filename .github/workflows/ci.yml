@@ -38,10 +38,12 @@ jobs:
             dags/ecommerce_weekly_full_refresh_dag.py \
             include/ingestion_guards.py \
             include/sqs_parser.py \
-            scripts/export_to_csv.py
+            scripts/export_to_csv.py \
+            tests/test_ingestion_guards.py \
+            tests/test_sqs_parser.py
 
       - name: Run Python unit tests
-        run: python -m unittest discover -s tests -p "test_*.py" -v
+        run: python -m unittest tests/test_ingestion_guards.py tests/test_sqs_parser.py -v
 
   # Job 2: Kiểm tra parse toàn bộ mô hình dbt, sources và schema tests (offline, $0 AWS)
   dbt-parse-validation:

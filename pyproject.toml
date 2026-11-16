@@ -1,0 +1,11 @@
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]
+ignore = [
+    "E402",  # Module level import not at top of file (cần thiết cho sys.path và optional fallback imports)
+    "F401",  # Module imported but unused (cần thiết cho conditional imports)
+    "F841",  # Local variable assigned but never used
+]

@@ -11,8 +11,8 @@ aws-verify:
 	aws sts get-caller-identity
 
 verify:
-	python3 -m py_compile dags/ecommerce_pipeline_dag.py dags/ecommerce_weekly_full_refresh_dag.py include/ingestion_guards.py include/sqs_parser.py scripts/export_to_csv.py
-	python3 -m unittest discover -s tests -p "test_*.py" -v
+	python3 -m py_compile dags/ecommerce_pipeline_dag.py dags/ecommerce_weekly_full_refresh_dag.py include/ingestion_guards.py include/sqs_parser.py scripts/export_to_csv.py tests/test_ingestion_guards.py tests/test_sqs_parser.py
+	python3 -m unittest tests/test_ingestion_guards.py tests/test_sqs_parser.py -v
 	@if [ -x "./venv/bin/dbt" ]; then \
 		DBT_REDSHIFT_PASSWORD=local_verify_dummy ./venv/bin/dbt parse --project-dir dbt --profiles-dir dbt; \
 	elif command -v dbt >/dev/null 2>&1; then \

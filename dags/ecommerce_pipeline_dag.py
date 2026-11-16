@@ -156,7 +156,7 @@ with DAG(
         "asset-watcher",
         "v4",
     ],
-) as dag:
+):
 
     start_pipeline = EmptyOperator(task_id="start_pipeline")
 
