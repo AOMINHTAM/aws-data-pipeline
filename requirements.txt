@@ -4,5 +4,5 @@ astronomer-cosmos
 # Adapter dbt cho Redshift
 dbt-redshift
 
-# Provider AWS cho Airflow (S3, Redshift)
-apache-airflow-providers-amazon
+# Provider AWS cho Airflow (S3, SQS, Redshift + aiobotocore cho AssetWatcher async trigger)
+apache-airflow-providers-amazon[aiobotocore]
