@@ -128,7 +128,11 @@ class TestSqsParser(unittest.TestCase):
                     {
                         "eventSource": "aws:s3",
                         "eventName": "ObjectCreated:Put",
-                        "s3": {"object": {"key": "raw/product%5Fcategory%5Fname%5Ftranslation.csv"}},
+                        "s3": {
+                            "object": {
+                                "key": "raw/product%5Fcategory%5Fname%5Ftranslation.csv"
+                            }
+                        },
                     }
                 ]
             }),

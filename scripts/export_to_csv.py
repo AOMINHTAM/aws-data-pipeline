@@ -65,7 +65,7 @@ except ImportError:
 
 # --- Cấu hình kết nối Redshift ---
 REDSHIFT_HOST = os.getenv(
-    "REDSHIFT_HOST", 
+    "REDSHIFT_HOST",
     "ecommerce-workgroup.205506434601.us-east-1.redshift-serverless.amazonaws.com"
 )
 REDSHIFT_PORT = int(os.getenv("REDSHIFT_PORT", "5439"))
@@ -85,7 +85,7 @@ QUERIES = {
     "1_master_orders_analytics.csv": {
         "description": "Bảng phân tích tổng hợp đơn hàng (Orders + Customers + Delivery + Revenue)",
         "sql": """
-            SELECT 
+            SELECT
                 o.order_id,
                 o.customer_id,
                 c.customer_unique_id,
@@ -118,7 +118,7 @@ QUERIES = {
     "2_dim_products.csv": {
         "description": "Danh mục sản phẩm (Tên tiếng Anh chuẩn hóa, kích thước, trọng lượng)",
         "sql": """
-            SELECT 
+            SELECT
                 product_id,
                 category_name,
                 category_name_portuguese,
@@ -136,7 +136,7 @@ QUERIES = {
     "3_dim_customers.csv": {
         "description": "Khách hàng & Giá trị vòng đời (LTV, số lượng đơn, phân khúc)",
         "sql": """
-            SELECT 
+            SELECT
                 customer_id,
                 customer_unique_id,
                 city,
@@ -154,7 +154,7 @@ QUERIES = {
     "4_order_items_product_sales.csv": {
         "description": "Chi tiết từng item trong đơn hàng kèm tên danh mục sản phẩm",
         "sql": """
-            SELECT 
+            SELECT
                 oi.order_id,
                 oi.order_item_id,
                 oi.product_id,
@@ -196,8 +196,14 @@ def main():
         print(f"\n❌ Kết nối thất bại: {e}")
         print("\n💡 GỢI Ý KHẮC PHỤC:")
         print("1. Kiểm tra Redshift Workgroup đã bật 'Publicly Accessible = Turn On' chưa.")
-        print("2. Kiểm tra Security Group Inbound Rule đã mở Port 5439 cho IP hiện tại (hoặc 0.0.0.0/0) chưa.")
-        print("3. Nếu bạn đang bật Cloudflare WARP (1.1.1.1) hoặc VPN, hãy tạm tắt để tránh xung đột IP.")
+        print(
+            "2. Kiểm tra Security Group Inbound Rule đã mở Port 5439 "
+            "cho IP hiện tại (hoặc 0.0.0.0/0) chưa."
+        )
+        print(
+            "3. Nếu bạn đang bật Cloudflare WARP (1.1.1.1) hoặc VPN, "
+            "hãy tạm tắt để tránh xung đột IP."
+        )
         print("4. Kiểm tra mật khẩu trong file .env (DBT_REDSHIFT_PASSWORD).")
         sys.exit(1)
 
@@ -216,7 +222,7 @@ def main():
             query_start = time.time()
 
             cursor.execute(sql)
-            
+
             # Sử dụng native fetch_dataframe của redshift_connector để có hiệu năng cao nhất
             df = cursor.fetch_dataframe()
             query_duration = time.time() - query_start
@@ -225,7 +231,10 @@ def main():
             df.to_csv(file_path, index=False, encoding="utf-8")
             file_size_mb = file_path.stat().st_size / (1024 * 1024)
 
-            print(f"    ✅ Hoàn thành: {len(df):,} dòng | {file_size_mb:.2f} MB | {query_duration:.2f}s")
+            print(
+                f"    ✅ Hoàn thành: {len(df):,} dòng | {file_size_mb:.2f} MB | "
+                f"{query_duration:.2f}s"
+            )
             print(f"    💾 Lưu tại: {file_path}\n")
 
             results_summary.append({
@@ -251,12 +260,18 @@ def main():
     total_size = 0.0
 
     for item in results_summary:
-        print(f" • {item['file']:<32} | {item['rows']:>8,} dòng | {item['size_mb']:>6.2f} MB | {item['time_sec']:>5.2f}s")
+        print(
+            f" • {item['file']:<32} | {item['rows']:>8,} dòng | "
+            f"{item['size_mb']:>6.2f} MB | {item['time_sec']:>5.2f}s"
+        )
         total_rows += item["rows"]
         total_size += item["size_mb"]
 
     print("-" * 70)
-    print(f"🎉 TỔNG CỘNG: {len(results_summary)} files | {total_rows:,} dòng | {total_size:.2f} MB | Thời gian: {total_duration:.2f}s")
+    print(
+        f"🎉 TỔNG CỘNG: {len(results_summary)} files | {total_rows:,} dòng | "
+        f"{total_size:.2f} MB | Thời gian: {total_duration:.2f}s"
+    )
     print(f"📂 Thư mục chứa file: {OUTPUT_DIR.resolve()}")
     print("=" * 70)
 

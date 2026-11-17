@@ -99,7 +99,7 @@ sqs_raw_arrival_asset = Asset(
 def _delete_sqs_handles(
     sqs_client, receipt_handles: list[str], context_label: str
 ) -> list[str]:
-    """Xóa danh sách SQS messages theo ReceiptHandle (ACK) và trả về danh sách handle lỗi (nếu có)."""
+    """Xóa SQS messages theo ReceiptHandle (ACK) và trả về danh sách handle lỗi (nếu có)."""
     failed_handles: list[str] = []
     for handle in receipt_handles:
         try:
@@ -141,7 +141,8 @@ with DAG(
     default_args=default_args,
     description=(
         "True Event-Driven AWS ELT Pipeline V4 "
-        "(S3 -> SQS AssetWatcher -> Atomic Redshift Staging Swap -> dbt Incremental -> Archive & ACK)"
+        "(S3 -> SQS AssetWatcher -> Atomic Redshift Staging Swap -> "
+        "dbt Incremental -> Archive & ACK)"
     ),
     schedule=[sqs_raw_arrival_asset],
     start_date=datetime(2026, 1, 1),
@@ -161,7 +162,7 @@ with DAG(
     start_pipeline = EmptyOperator(task_id="start_pipeline")
 
     # 1. Tiêu thụ SQS messages từ AssetWatcher (hoặc manual trigger), kiểm tra S3 tồn tại
-    #    và nạp vào Redshift qua TEMP TABLE + Atomic Transaction (DELETE + INSERT, không dùng TRUNCATE)
+    #    và nạp vào Redshift qua TEMP TABLE + Atomic Transaction (DELETE + INSERT)
     @task
     def load_raw_from_sqs(**context) -> list[dict]:
         import redshift_connector
@@ -172,7 +173,8 @@ with DAG(
         all_messages = _collect_sqs_messages(context, sqs_client)
         if not all_messages:
             raise AirflowSkipException(
-                "Không có message nào trong AssetEvent hoặc SQS queue -> SKIP pipeline ($0 Redshift RPU)."
+                "Không có message nào trong AssetEvent hoặc SQS queue -> "
+                "SKIP pipeline ($0 Redshift RPU)."
             )
 
         print(f"Đã thu thập {len(all_messages)} SQS message(s) (đã deduplicate).")
@@ -186,7 +188,7 @@ with DAG(
                 "Không có file CSV Olist hợp lệ nào trong batch -> SKIP pipeline ($0 Redshift RPU)."
             )
 
-        # Kiểm tra file còn trên S3 trước khi đánh thức Redshift (Application-level Idempotent Guard)
+        # Kiểm tra file còn trên S3 trước khi đánh thức Redshift (Idempotent Guard)
         s3_hook = S3Hook(aws_conn_id="aws_default")
         files_to_load: list[dict] = []
         for file_info in valid_files:
@@ -195,7 +197,8 @@ with DAG(
                 files_to_load.append(file_info)
             else:
                 print(
-                    f"ℹ️ Bỏ qua '{s3_key}' (không còn trên raw/ — đã được xử lý trước đó / duplicate SQS delivery)."
+                    f"ℹ️ Bỏ qua '{s3_key}' (không còn trên raw/ — "
+                    "đã được xử lý trước đó / duplicate SQS delivery)."
                 )
                 _delete_sqs_handles(
                     sqs_client,
@@ -238,7 +241,7 @@ with DAG(
                 tmp_table = f"tmp_stage_{table_name}"
 
                 try:
-                    # Bước A: Nạp vào TEMP TABLE trước — nếu CSV lỗi/mất mạng, bảng đích raw_data không bị ảnh hưởng
+                    # Bước A: Nạp vào TEMP TABLE trước — nếu lỗi, bảng đích raw_data vẫn an toàn
                     print(f"Staging {s3_uri} -> {tmp_table} ...")
                     cursor.execute(f"DROP TABLE IF EXISTS {tmp_table};")
                     cursor.execute(f"CREATE TEMP TABLE {tmp_table} (LIKE raw_data.{table_name});")
@@ -260,7 +263,7 @@ with DAG(
                     conn.commit()
                     print(f"Đã stage {staged_rows} dòng từ '{file_info['filename']}'.")
 
-                    # Bước B: Hoán đổi nguyên tử (Atomic Swap) — KHÔNG dùng TRUNCATE vì TRUNCATE tự commit ở Redshift!
+                    # Bước B: Hoán đổi nguyên tử (Atomic Swap) — KHÔNG dùng TRUNCATE vì tự commit!
                     cursor.execute(f"DELETE FROM raw_data.{table_name};")
                     cursor.execute(
                         f"INSERT INTO raw_data.{table_name} SELECT * FROM {tmp_table};"
@@ -281,14 +284,14 @@ with DAG(
 
         return loaded_items
 
-    # 2. Cosmos parse dbt project thành TaskGroup (chạy staging views, incremental marts & dbt tests)
+    # 2. Cosmos parse dbt project thành TaskGroup (staging views, incremental marts & tests)
     dbt_transform = DbtTaskGroup(
         group_id="dbt_transformation_and_tests",
         project_config=project_config,
         profile_config=profile_config,
     )
 
-    # 3. Chỉ archive S3 -> xóa khỏi raw/ -> ACK (delete) SQS KHI VÀ CHỈ KHI dbt & data quality tests PASS
+    # 3. Chỉ archive S3 -> xóa khỏi raw/ -> ACK (delete) SQS KHI VÀ CHỈ KHI dbt & tests PASS
     @task
     def archive_and_ack_sqs_messages(loaded_items: list[dict]) -> None:
         if not loaded_items:
@@ -317,7 +320,7 @@ with DAG(
                 )
                 print(f"📦 S3 Archive: {src_key} -> {dest_key}")
 
-                # 2. Dọn file khỏi raw/ trước khi ACK SQS để tránh file mồ côi trong raw/ nếu delete lỗi
+                # 2. Dọn file khỏi raw/ trước khi ACK SQS để tránh file mồ côi nếu delete lỗi
                 s3_hook.delete_objects(bucket=S3_BUCKET, keys=[src_key])
                 print(f"🧹 S3 Cleanup: Đã xóa {src_key} khỏi raw/.")
                 archived_count += 1
@@ -341,7 +344,7 @@ with DAG(
 
         print(
             f"🎉 Hoàn tất chu trình Pure Event-Driven: {archived_count} file "
-            f"đã được nạp atomic vào Redshift, chạy dbt Incremental, archive trên S3 và ACK khỏi SQS."
+            "đã được nạp atomic vào Redshift, chạy dbt Incremental, archive S3 và ACK SQS."
         )
 
     end_pipeline = EmptyOperator(task_id="end_pipeline")
