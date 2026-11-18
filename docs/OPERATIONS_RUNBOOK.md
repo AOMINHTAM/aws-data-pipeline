@@ -58,6 +58,7 @@ make cfn-status
 >      --default-iam-role-arn "$ROLE_ARN" \
 >      --region us-east-1
 >    ```
+>    *(Also update `REDSHIFT_IAM_ROLE=$ROLE_ARN` in `.env` whenever `RedshiftS3ReadOnlyRoleArn` is created or replaced after a stack update).*
 
 ### 1.4. Infrastructure Rollback Procedures
 * **Native Automatic Rollback:** If any resource fails during creation or update, AWS CloudFormation automatically transitions to `ROLLBACK_IN_PROGRESS` / `UPDATE_ROLLBACK_IN_PROGRESS` and restores the stack to its previous clean state.

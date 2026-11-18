@@ -5,6 +5,8 @@ PROJECT_PREFIX ?= olist-v5
 ENV_NAME ?= dev
 AWS_REGION ?= us-east-1
 ALERT_EMAIL ?=
+AIRFLOW_IAM_USER ?=
+DLQ_IAM_USER ?=
 CFN_TEMPLATE = infra/cloudformation/template.yaml
 
 help:
@@ -47,6 +49,8 @@ cfn-deploy:
 		--parameter-overrides \
 			ProjectPrefix=$(PROJECT_PREFIX) \
 			EnvironmentName=$(ENV_NAME) \
+			AirflowPrincipalUserName="$(AIRFLOW_IAM_USER)" \
+			DlqOperatorUserName="$(DLQ_IAM_USER)" \
 			AlertEmail="$(ALERT_EMAIL)" \
 			DeployRedshift=false
 

@@ -55,7 +55,7 @@ Cả 4 Alarms đều gắn `TreatMissingData: notBreaching` (khi hàng đợi nh
 Ngoài ra, **`PipelineAlertTopicPolicy`** (`AWS::SNS::TopicPolicy`) giới hạn chỉ dịch vụ `cloudwatch.amazonaws.com` đúng `aws:SourceAccount` và ARN `alarm:${ProjectPrefix}-*-${EnvironmentName}` mới được phép `sns:Publish`.
 
 ### 2.5. Công tắc FinOps (`DeployRedshift`) & Bảo mật Redshift Serverless
-- **`DeployRedshift=false` (Mặc định):** Dựng toàn bộ 14 tài nguyên S3 + SQS + DLQ + 4 Alarms + SNS + IAM trong hạn mức Always Free / lưu trữ tối thiểu (~$0.003/tháng cho ~120 MB S3), tái sử dụng cụm Redshift Serverless sẵn có.
+- **`DeployRedshift=false` (Mặc định):** Dựng toàn bộ 15 tài nguyên cốt lõi (S3 + BucketPolicy + SQS + DLQ + 4 Alarms + SNS + IAM) trong hạn mức Always Free / lưu trữ tối thiểu (~$0.003/tháng cho ~120 MB S3), tái sử dụng cụm Redshift Serverless sẵn có.
 - **`DeployRedshift=true`:** Tự động dựng Namespace + Workgroup 4 RPUs với **`PubliclyAccessible=false`** mặc định, **`SecurityGroupIds`** + **`SubnetIds`** nối đầy đủ, `AuthorizedCidrIp` mặc định `127.0.0.1/32` (không mở `0.0.0.0/0`), và **`ManageAdminPassword: true`** (tự quản lý mật khẩu an toàn qua **AWS Secrets Manager** nếu không truyền `RedshiftAdminPassword`).
 
 ---
@@ -65,7 +65,7 @@ Ngoài ra, **`PipelineAlertTopicPolicy`** (`AWS::SNS::TopicPolicy`) giới hạn
 ### 3.1. Bug thực tế của Airflow 3 Task SDK đã bắt & vá khi test live
 Khi kiểm thử live Bước 5 trên **Airflow 3.3**, hàm `extract_messages_from_asset_events` ban đầu trả về `[]` khiến task bị skip dù `SqsSensorTrigger` đã phát `TriggerEvent` chứa đủ `message_batch`.
 - **Nguyên nhân gốc:** Trong Airflow 3 Task SDK, `context["triggering_asset_events"]` là một object **`TriggeringAssetEventsAccessor`**, kế thừa từ `collections.abc.Mapping` chứ **không phải `dict`**. Kiểm tra `isinstance(..., dict)` luôn trả về `False`!
-- **Cách khắc phục:** Chuyển sang `isinstance(..., Mapping)` trong [`include/sqs_parser.py`](../include/sqs_parser.py) và bổ sung bộ unit test trong [`tests/test_sqs_parser.py`](../tests/test_sqs_parser.py) & [`tests/test_ingestion_guards.py`](../tests/test_ingestion_guards.py) (**20/20 unit tests PASS**).
+- **Cách khắc phục:** Chuyển sang `isinstance(..., Mapping)` trong [`include/sqs_parser.py`](../include/sqs_parser.py) và bổ sung bộ unit test trong [`tests/test_sqs_parser.py`](../tests/test_sqs_parser.py) & [`tests/test_ingestion_guards.py`](../tests/test_ingestion_guards.py) (**21/21 unit tests PASS**).
 
 ### 3.2. State Machine của `ops.pipeline_ingestion_audit`, Two-Phase Staging & Safe ACK
 ```mermaid

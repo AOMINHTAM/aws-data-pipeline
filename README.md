@@ -9,7 +9,7 @@
 An enterprise-grade, **pure event-driven, fault-tolerant ELT Data Pipeline** built on **AWS** using **Infrastructure as Code (AWS CloudFormation)**, **Amazon S3 (Versioned Data Lake)**, **Amazon SQS + Dead-Letter Queue (DLQ)**, **Amazon CloudWatch (4 Alarms) + Amazon SNS**, **Amazon Redshift Serverless**, **dbt Core**, and **Apache Airflow 3 (Astro CLI & Astronomer Cosmos)**.
 
 Upgraded from the **V4 (`v4.0.1`)** Event-Driven Data Core into **V5 Production CloudOps (AWS First Cloud Journey Standard)**:
-* **100% Reproducible CloudFormation IaC ([`infra/cloudformation/template.yaml`](infra/cloudformation/template.yaml)):** Provisions 14 core resources (and 4 conditional FinOps/Redshift resources) with **Native Stack Auto-Rollback**, `cfn-lint` CI validation, and 1-command versioned bucket clean-up (`make cfn-delete`).
+* **100% Reproducible CloudFormation IaC ([`infra/cloudformation/template.yaml`](infra/cloudformation/template.yaml)):** Provisions 15 core resources (and 4 conditional FinOps/Redshift resources) with **Native Stack Auto-Rollback**, `cfn-lint` CI validation, and 1-command versioned bucket clean-up (`make cfn-delete`).
 * **Resilient Ingestion & Poison Message Isolation:** Amazon S3 emits `s3:ObjectCreated:*` notifications into `SqsMainQueue` (`VisibilityTimeout=900s`, `Long Polling 20s`). Empty or malformed CSVs are blocked by [`ensure_non_empty_stage`](include/ingestion_guards.py) inside an explicit per-table `TEMP TABLE` + `DELETE/INSERT` transaction (`autocommit=False`), and repeated failures (`maxReceiveCount=3`) isolate into `SqsDeadLetterQueue` (`RedriveAllowPolicy: byQueue`) for safe **DLQ Redrive** after remediation.
 * **Active 4-Alarm CloudWatch & SNS Alerting:** Monitors DLQ arrivals (`>= 1`), SLA queue age (`> 600s`), sustained in-flight activity (`>= 1` for 15m), and backlog volume (`>= 20`), dispatching instant email alerts via `PipelineAlertTopicPolicy` + Amazon SNS.
 * **Ingestion Audit Ledger & Deterministic Safe ACK:** Tracks per-run lifecycle transitions (`SWAPPED` → `ARCHIVED` → `COMPLETED` / `FAILED`) in [`ops.pipeline_ingestion_audit`](scripts/create_ops_audit_table.sql), archives to deterministic `archive/<audit_id>/<filename>` paths, refreshes SQS `VisibilityTimeout` across stages, and blocks premature ACKs via [`verify_safe_to_ack_when_raw_missing`](include/ingestion_guards.py).
@@ -122,9 +122,9 @@ Dependency lineage from 9 `raw_data` sources through 7 `public_staging` views in
 * **Disaster Recovery & Clean-up Runbook:** Bilingual [`docs/OPERATIONS_RUNBOOK.md`](docs/OPERATIONS_RUNBOOK.md) | [`Tiếng Việt`](docs/OPERATIONS_RUNBOOK.vi.md) covers Change Sets, Stack Rollback, DLQ Redrive, Redshift Serverless Recovery Points/Snapshots, S3 Event Replay, `ops.pipeline_ingestion_audit` queries, and 1-command `make cfn-delete` (powered by [`scripts/empty_versioned_bucket.py`](scripts/empty_versioned_bucket.py)).
 
 ### 2. Event-Driven Ingestion, Audit Ledger & Safe ACK
-* **Airflow 3 `AssetWatcher` (`Mapping` Support):** [`include/sqs_parser.py`](include/sqs_parser.py) supports both `dict` and Airflow 3 `TriggeringAssetEventsAccessor` (`collections.abc.Mapping`), verified by 15/15 unit tests in [`tests/`](tests/).
-* **Per-Table Atomic Swap & Empty-Stage Guard:** Stages CSVs into a Redshift `TEMP TABLE`, enforces [`ensure_non_empty_stage`](include/ingestion_guards.py) (`staged_rows > 0`), and executes `DELETE + INSERT` inside `autocommit=False` *(atomicity is per target table, not across a multi-file batch)*.
-* **Audit-Verified Safe ACK & Heartbeat:** [`dags/ecommerce_pipeline_dag.py`](dags/ecommerce_pipeline_dag.py) refreshes `VisibilityTimeout=900s` post-swap and pre-archive, writes deterministic `archive/<audit_id>/<filename>`, logs `SWAPPED` → `ARCHIVED` → `COMPLETED` (or `FAILED`), and enforces [`verify_safe_to_ack_when_raw_missing`](include/ingestion_guards.py) on retries so a missing `raw/` object never causes a blind SQS ACK.
+* **Airflow 3 `AssetWatcher` (`Mapping` Support):** [`include/sqs_parser.py`](include/sqs_parser.py) supports both `dict` and Airflow 3 `TriggeringAssetEventsAccessor` (`collections.abc.Mapping`), verified by 21/21 unit tests in [`tests/`](tests/).
+* **Two-Phase Validated Atomic Swap, CSV Header Guard & Empty-Stage Guard:** Validates CSV headers (`validate_csv_header`), stages all batch CSVs into Redshift `TEMP TABLE`s, enforces [`ensure_non_empty_stage`](include/ingestion_guards.py) (`staged_rows > 0`), and executes `DELETE + INSERT` + `SWAPPED` audit logging inside the same explicit `autocommit=False` transaction.
+* **Audit-Verified Safe ACK & Heartbeat:** [`dags/ecommerce_pipeline_dag.py`](dags/ecommerce_pipeline_dag.py) refreshes `VisibilityTimeout=900s` (fail-closed prior to S3 modifications), writes cross-run deterministic `archive/<audit_id>/<filename>`, logs `SWAPPED` → `ARCHIVED` → `COMPLETED` (or `FAILED`), defers multi-record SQS ACKs until batch completion, and enforces [`verify_safe_to_ack_when_raw_missing`](include/ingestion_guards.py) in both Task 1 and Task 3 so a missing `raw/` object never causes a blind SQS ACK.
 
 ### 3. Cloud Security & FinOps
 * **Split Least-Privilege IAM:** `RedshiftS3ReadOnlyRole` reads strictly `raw/*` via STS `AssumeRole` (`aws:SourceAccount` constrained); `AirflowRuntimePolicy` handles `SqsMainQueue` + S3 `raw/*` (`GET/DELETE`) & `archive/*` (`GET/PUT`, no `DELETE`); `DlqOperatorPolicy` isolates DLQ inspection and `StartMessageMoveTask` redrive permissions; `PipelineAlertTopicPolicy` locks SNS publishing to account CloudWatch alarms.
@@ -171,8 +171,8 @@ aws_data_pipeline/
 │   └── RETROSPECTIVE.vi.md                   # Engineering retrospective & V2->V5 verification report (VI)
 ├── tests/
 │   ├── dags/test_dag_example.py              # Pytest DAG validation (imports, tags, retries >= 2)
-│   ├── test_ingestion_guards.py              # Unit tests for empty-stage & Safe ACK guards (7/7 passing)
-│   └── test_sqs_parser.py                    # Unit tests for SQS + Airflow 3 Mapping accessor parsing (8/8 passing)
+│   ├── test_ingestion_guards.py              # Unit tests for header, empty-stage & Safe ACK guards (11/11 passing)
+│   └── test_sqs_parser.py                    # Unit tests for SQS + Airflow 3 Mapping accessor parsing (10/10 passing)
 ├── images/                                   # V2-V5 Draw.io diagrams (.drawio + .png) and live verification screenshots
 ├── scripts/
 │   ├── create_raw_tables.sql                 # Redshift DDL for raw_data schema

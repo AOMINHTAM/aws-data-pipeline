@@ -197,3 +197,27 @@ def verify_safe_to_ack_when_raw_missing(
             f"verified archive object '{archive_key or 'N/A'}' not found in S3 archive/."
         )
     return True
+
+
+def filter_ackable_missing_raw_handles(
+    missing_handles: list[str],
+    active_load_items: list[dict],
+) -> list[str]:
+    """
+    Chặn ACK sớm ở Task 1 khi một SQS message chứa nhiều S3 Records
+    (1 file đã missing/archived nhưng file khác cùng ReceiptHandle vẫn đang nằm
+    trong `files_to_load` chờ stage/dbt/archive ở Task 3).
+    Chỉ trả về các ReceiptHandle không còn gắn với bất kỳ file nào trong `active_load_items`.
+    """
+    in_use_handles = {
+        handle
+        for item in (active_load_items or [])
+        for handle in (item.get("receipt_handles") or [])
+        if isinstance(handle, str) and handle
+    }
+    return [
+        handle
+        for handle in (missing_handles or [])
+        if isinstance(handle, str) and handle and handle not in in_use_handles
+    ]
+

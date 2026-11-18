@@ -16,6 +16,7 @@ from include.ingestion_guards import (  # noqa: E402
     build_audit_id,
     build_deterministic_archive_key,
     ensure_non_empty_stage,
+    filter_ackable_missing_raw_handles,
     validate_csv_header,
     verify_safe_to_ack_when_raw_missing,
 )
@@ -444,15 +445,25 @@ with DAG(
                     f"ℹ️ Xác minh duplicate an toàn cho '{s3_key}' "
                     f"(audit={audit_status}, archive='{recorded_archive_key}')."
                 )
-                failed_dup_handles = _delete_sqs_handles(
-                    sqs_client,
+                ackable_handles = filter_ackable_missing_raw_handles(
                     missing_info.get("receipt_handles", []),
-                    f"verified-duplicate-{missing_info['filename']}",
+                    files_to_load,
                 )
-                if failed_dup_handles:
-                    raise RuntimeError(
-                        f"Không thể ACK duplicate message cho '{s3_key}' "
-                        f"({len(failed_dup_handles)} handles)."
+                if ackable_handles:
+                    failed_dup_handles = _delete_sqs_handles(
+                        sqs_client,
+                        ackable_handles,
+                        f"verified-duplicate-{missing_info['filename']}",
+                    )
+                    if failed_dup_handles:
+                        raise RuntimeError(
+                            f"Không thể ACK duplicate message cho '{s3_key}' "
+                            f"({len(failed_dup_handles)} handles)."
+                        )
+                else:
+                    print(
+                        f"ℹ️ Giữ lại ReceiptHandle của '{s3_key}' vì còn dùng chung "
+                        "với file khác trong batch đang chờ nạp."
                     )
 
             if not files_to_load:

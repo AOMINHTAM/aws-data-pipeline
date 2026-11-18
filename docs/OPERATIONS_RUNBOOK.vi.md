@@ -59,6 +59,7 @@ make cfn-status
 >      --default-iam-role-arn "$ROLE_ARN" \
 >      --region us-east-1
 >    ```
+>    *(Đồng thời cập nhật lại `REDSHIFT_IAM_ROLE=$ROLE_ARN` trong `.env` bất cứ khi nào Role ARN mới được tạo hoặc thay thế sau khi update stack).*
 
 ### 1.4. Cơ chế Rollback Hạ tầng (Infrastructure Rollback)
 * **Tự động Rollback khi Deploy lỗi (Native Auto-Rollback):**
@@ -190,7 +191,7 @@ astro dev stop
 ```bash
 make cfn-delete
 ```
-*(Lệnh `make cfn-delete` tự động chạy `aws s3 rm s3://<bucket> --recursive`, sau đó gọi `aws cloudformation delete-stack` và chờ tới khi `stack-delete-complete`.)*
+*(Lệnh `make cfn-delete` tự động chạy `aws s3 rm s3://<bucket> --recursive` và `python3 scripts/empty_versioned_bucket.py` để xóa sạch toàn bộ `Versions` + `DeleteMarkers`, sau đó gọi `aws cloudformation delete-stack` và chờ tới khi `stack-delete-complete`.)*
 
 ### Bước 3 — (Nếu tạo Redshift Serverless thủ công ngoài Stack) Xóa Workgroup, Namespace & Snapshots
 ```bash

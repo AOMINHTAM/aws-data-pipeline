@@ -11,6 +11,7 @@ from include.ingestion_guards import (
     build_audit_id,
     build_deterministic_archive_key,
     ensure_non_empty_stage,
+    filter_ackable_missing_raw_handles,
     validate_csv_header,
     verify_safe_to_ack_when_raw_missing,
 )
@@ -144,6 +145,20 @@ class TestIngestionGuards(unittest.TestCase):
                 expected_archive_key=expected,
             )
         self.assertIn("not found in S3 archive/", str(ctx2.exception))
+
+    def test_filter_ackable_missing_raw_handles_defers_shared_multi_record_handle(self):
+        # Handle "rh-shared" đang dùng chung bởi file khác trong files_to_load -> không ACK sớm
+        active_load_items = [
+            {
+                "filename": "olist_customers_dataset.csv",
+                "receipt_handles": ["rh-shared", "rh-customers-only"],
+            }
+        ]
+        ackable = filter_ackable_missing_raw_handles(
+            ["rh-shared", "rh-isolated-dup"],
+            active_load_items,
+        )
+        self.assertEqual(ackable, ["rh-isolated-dup"])
 
 
 if __name__ == "__main__":

@@ -60,7 +60,10 @@ def empty_versioned_bucket(bucket_name: str, region: str = "us-east-1") -> int:
                 del_cmd, capture_output=True, text=True, check=False
             )
             if del_res.returncode != 0:
-                break
+                err_detail = (del_res.stderr or del_res.stdout or "").strip()
+                raise RuntimeError(
+                    f"aws s3api delete-objects thất bại trên s3://{bucket_name}: {err_detail}"
+                )
             batch_progress += len(batch)
 
         if batch_progress == 0:

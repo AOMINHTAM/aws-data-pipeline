@@ -48,8 +48,8 @@ All four alarms set `TreatMissingData: notBreaching` and publish both `AlarmActi
 | **`MainQueueInFlightAlarm`** | `ApproximateNumberOfMessagesNotVisible >= 1` (`60s`, `Minimum`, `15/15`) | Surfaces sustained queue-level in-flight activity (15 consecutive minutes); note that continuous overlapping traffic can also trip this metric. |
 | **`MainQueueBacklogAlarm`** | `ApproximateNumberOfMessagesVisible >= 20` (`60s`, `Average`, `3/3`) | Detects sustained message accumulation across 3 consecutive minutes. |
 
-### 2.6. FinOps Toggle (`DeployRedshift`) & Hardened Conditional Redshift
-- **`DeployRedshift=false` (default):** Deploys and tests the 14 core S3/SQS/DLQ/Alarm/SNS/IAM resources while reusing an existing Redshift Serverless workgroup.
+### 2.5. FinOps Toggle (`DeployRedshift`) & Hardened Conditional Redshift
+- **`DeployRedshift=false` (default):** Deploys and tests the 15 core S3/SQS/DLQ/Alarm/SNS/IAM resources while reusing an existing Redshift Serverless workgroup.
 - **`DeployRedshift=true`:** Provisions a VPC-scoped workgroup (`PubliclyAccessible=false` by default, `SecurityGroupIds`, `SubnetIds`, `/32` CIDR validation) and automatically enables **`ManageAdminPassword: true`** (AWS Secrets Manager) when `RedshiftAdminPassword` is omitted.
 
 ---
@@ -59,7 +59,7 @@ All four alarms set `TreatMissingData: notBreaching` and publish both `AlarmActi
 ### 3.1. Real Airflow 3 Task SDK Bug Caught Live
 During live Bước 5 testing on Airflow 3.3, `extract_messages_from_asset_events` initially returned `[]` and skipped the run even though `SqsSensorTrigger` emitted a valid `TriggerEvent`:
 - **Root Cause:** In Airflow 3 Task SDK, `context["triggering_asset_events"]` is a `TriggeringAssetEventsAccessor` (subclass of `collections.abc.Mapping`, **not `dict`**), so `isinstance(..., dict)` returned `False`.
-- **Fix:** Updated [`include/sqs_parser.py`](../include/sqs_parser.py) to check `collections.abc.Mapping` and added dedicated unit tests in [`tests/test_sqs_parser.py`](../tests/test_sqs_parser.py) and [`tests/test_ingestion_guards.py`](../tests/test_ingestion_guards.py) (**20/20 unit tests passing**).
+- **Fix:** Updated [`include/sqs_parser.py`](../include/sqs_parser.py) to check `collections.abc.Mapping` and added dedicated unit tests in [`tests/test_sqs_parser.py`](../tests/test_sqs_parser.py) and [`tests/test_ingestion_guards.py`](../tests/test_ingestion_guards.py) (**21/21 unit tests passing**).
 
 ### 3.2. `ops.pipeline_ingestion_audit`, Two-Phase Batch Staging, Deterministic Archive & Safe ACK
 1. **Two-Phase Batch Staging, CSV Header Guard & Same-Transaction `SWAPPED` Audit:** [`dags/ecommerce_pipeline_dag.py`](../dags/ecommerce_pipeline_dag.py) first validates the CSV header row against [`EXPECTED_CSV_HEADERS`](../include/ingestion_guards.py) (`validate_csv_header`), stages every file in the batch into `TEMP TABLE tmp_stage_<table>`, and verifies `ensure_non_empty_stage` (`> 0` rows) **before** touching any target table in `raw_data.*`. Once all files in the batch pass staging, Phase B executes `DELETE + INSERT` and records `SWAPPED` (`rows_loaded = staged_rows`, fail-closed) **inside the same Redshift transaction**.
