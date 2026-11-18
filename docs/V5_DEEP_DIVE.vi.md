@@ -22,7 +22,7 @@
 
 ## 2. Giải phẫu Hạ tầng CloudFormation (`infra/cloudformation/template.yaml`)
 
-File [`infra/cloudformation/template.yaml`](../infra/cloudformation/template.yaml) định nghĩa **14 tài nguyên mặc định**, **4 tài nguyên tùy chọn** và **16 Outputs**.
+File [`infra/cloudformation/template.yaml`](../infra/cloudformation/template.yaml) định nghĩa **15 tài nguyên mặc định** (bao gồm `S3RawBucketPolicy` ép buộc HTTPS), **4 tài nguyên tùy chọn** và **16 Outputs**.
 
 ### 2.1. Cách phá bẫy "Circular Dependency kép" giữa S3, SQS Main Queue và DLQ
 Trong CloudFormation, một lỗi rất phổ biến khi dựng kiến trúc S3 Event $\rightarrow$ SQS + DLQ là **vòng lặp phụ thuộc**:
@@ -31,18 +31,18 @@ Trong CloudFormation, một lỗi rất phổ biến khi dựng kiến trúc S3 
 - **Vòng lặp 2 (SQS Main Queue $\leftrightarrow$ SQS DLQ):** `SqsMainQueue` tham chiếu `!GetAtt SqsDeadLetterQueue.Arn` trong `RedrivePolicy`. Nếu `SqsDeadLetterQueue` lại tham chiếu `!GetAtt SqsMainQueue.Arn` trong `RedriveAllowPolicy` $\rightarrow$ **Circular Dependency ngược**!
   - **Giải pháp V5:** `SqsDeadLetterQueue` ghép trước ARN của queue chính bằng `!Sub` trong `RedriveAllowPolicy: { redrivePermission: byQueue, sourceQueueArns: [...] }`. Nhờ đó AWS tạo chuẩn thứ tự: `DLQ` $\rightarrow$ `Main Queue` $\rightarrow$ `Queue Policy` $\rightarrow$ `S3 Bucket`.
 
-### 2.2. Bảo mật & Vòng đời Dữ liệu trên S3 (`S3RawBucket`)
-- **Bảo mật 4 lớp:** Bật mã hóa `AES256`, chặn toàn bộ 4 cờ `PublicAccessBlockConfiguration`, giới hạn `ProjectPrefix` tối đa 16 ký tự (đảm bảo tên bucket luôn $\le 55$ ký tự, an toàn dưới ngưỡng 63 ký tự của AWS).
-- **Versioning & Lifecycle:** Bật `VersioningConfiguration: Enabled` để giữ dấu vết khi có ghi đè file cùng tên; tự động hết hạn file trong `archive/` sau **90 ngày** và xóa các phiên bản cũ (`NoncurrentVersionExpiration`) sau **30 ngày**.
-- **Xử lý điểm mù khi xóa Stack (`make cfn-delete`):** Vì bucket đã bật Versioning, lệnh `aws s3 rm --recursive` thông thường chỉ tạo *DeleteMarkers* chứ không xóa các *Object Versions*, dẫn đến `delete-stack` bị lỗi `BucketNotEmpty`. Script [`scripts/empty_versioned_bucket.py`](../scripts/empty_versioned_bucket.py) tự động liệt kê và xóa sạch toàn bộ `Versions` + `DeleteMarkers` theo lô 500 object trước khi xóa Stack.
+### 2.2. Bảo mật & Vòng đời Dữ liệu trên S3 (`S3RawBucket` & `S3RawBucketPolicy`)
+- **Bảo mật 5 lớp:** Bật mã hóa `AES256`, chặn toàn bộ 4 cờ `PublicAccessBlockConfiguration`, gắn `S3RawBucketPolicy` từ chối mọi truy cập không qua HTTPS (`aws:SecureTransport: "false"`), và giới hạn `ProjectPrefix` tối đa 16 ký tự (đảm bảo tên bucket luôn $\le 55$ ký tự, an toàn dưới ngưỡng 63 ký tự của AWS).
+- **Versioning & Lifecycle:** Bật `VersioningConfiguration: Enabled` để giữ dấu vết khi có ghi đè file cùng tên; tự động hết hạn file trong `archive/` sau **90 ngày**, xóa các phiên bản cũ (`NoncurrentVersionExpiration`) sau **30 ngày**, tự động dọn `DeleteMarker` mồ côi (`ExpiredObjectDeleteMarker: true`) và hủy multipart upload treo sau **7 ngày** (`AbortIncompleteMultipartUpload`).
+- **Xử lý điểm mù khi xóa Stack (`make cfn-delete`):** Vì bucket đã bật Versioning, lệnh `aws s3 rm --recursive` thông thường chỉ tạo *DeleteMarkers* chứ không xóa các *Object Versions*, dẫn đến `delete-stack` bị lỗi `BucketNotEmpty`. Script [`scripts/empty_versioned_bucket.py`](../scripts/empty_versioned_bucket.py) tự động lặp phân trang (`while True`) liệt kê và xóa sạch toàn bộ `Versions` + `DeleteMarkers` theo lô 500 object (kể cả khi bucket có $> 1.000$ versions) trước khi xóa Stack.
 
-### 2.3. Phân tách Quyền Least-Privilege IAM (3 Nhóm Độc lập)
+### 2.3. Phân tách Quyền Least-Privilege IAM (3 Nhóm Độc lập có hậu tố `${AWS::Region}`)
 
 | Thành phần IAM | Phạm vi tài nguyên | Quyền được cấp (V5) | Vì sao tách như vậy? |
 | :--- | :--- | :--- | :--- |
-| **`RedshiftS3ReadOnlyRole`** *(IAM Role)* | Chỉ `S3RawBucket` prefix `raw/*` | `sts:AssumeRole` (khóa `aws:SourceAccount`), `s3:GetBucketLocation`, `s3:ListBucket` (`s3:prefix: raw/*`), `s3:GetObject` / `GetObjectVersion` trên `raw/*` | Redshift chỉ cần đọc dữ liệu thô ở `raw/` để chạy `COPY`, không được phép đọc sang `archive/` hay ghi/xóa S3. |
-| **`AirflowRuntimePolicy`** *(Managed Policy)* | `SqsMainQueue` + `S3RawBucket` (`raw/*`, `archive/*`) | SQS: `ReceiveMessage`, `DeleteMessage`, `ChangeMessageVisibility`, `GetQueueAttributes`, `GetQueueUrl`.<br>S3: `GET/DELETE` trên `raw/*`; `GET/PUT` (**không có `DELETE`**) trên `archive/*`. | Tách hẳn khỏi quyền Redshift; Airflow không thể xóa nhầm dữ liệu lịch sử trong `archive/` và không tự đụng vào DLQ. |
-| **`DlqOperatorPolicy`** *(Managed Policy)* | `SqsDeadLetterQueue` + `SqsMainQueue` | `StartMessageMoveTask`, `CancelMessageMoveTask`, `ListMessageMoveTasks`, `Receive/Delete`, `ListDeadLetterSourceQueues` trên DLQ + `SendMessage` về Main Queue. | Cô lập quyền xử lý sự cố (DLQ Redrive) dành riêng cho kỹ sư vận hành. |
+| **`RedshiftS3ReadOnlyRole`** *(IAM Role `*-${AWS::Region}`)* | Chỉ `S3RawBucket` prefix `raw/*` | `sts:AssumeRole` (khóa `aws:SourceAccount`), `s3:GetBucketLocation`, `s3:ListBucket` (`s3:prefix: raw/*`), `s3:GetObject` / `GetObjectVersion` trên `raw/*` | Redshift chỉ cần đọc dữ liệu thô ở `raw/` để chạy `COPY`, không được phép đọc sang `archive/` hay ghi/xóa S3. |
+| **`AirflowRuntimePolicy`** *(Managed Policy `*-${AWS::Region}`)* | `SqsMainQueue` + `S3RawBucket` (`raw/*`, `archive/*`) | SQS: `ReceiveMessage`, `DeleteMessage`, `ChangeMessageVisibility`, `GetQueueAttributes`, `GetQueueUrl`.<br>S3: `GET/DELETE` trên `raw/*`; `GET/PUT` (**không có `DELETE`**) trên `archive/*`. | Gắn tùy chọn vào `AirflowPrincipalUserName` (`Default: ""` giúp deploy mới trên mọi AWS account không lỗi); không thể xóa nhầm `archive/` hay đụng vào DLQ. |
+| **`DlqOperatorPolicy`** *(Managed Policy `*-${AWS::Region}`)* | `SqsDeadLetterQueue` + `SqsMainQueue` | `StartMessageMoveTask`, `CancelMessageMoveTask`, `ListMessageMoveTasks`, `Receive/Delete`, `ListDeadLetterSourceQueues` trên DLQ + `SendMessage` về Main Queue. | Gắn tùy chọn vào `DlqOperatorUserName` riêng biệt (Separation of Duties ở cấp Principal) cho kỹ sư vận hành. |
 
 ### 2.4. Giải phẫu 4 CloudWatch Alarms + `PipelineAlertTopicPolicy`
 Cả 4 Alarms đều gắn `TreatMissingData: notBreaching` (khi hàng đợi nhàn rỗi không phát metric thì giữ trạng thái xanh `OK`, tránh báo động giả) và gắn cả `AlarmActions` lẫn `OKActions` tới `PipelineAlertTopic`:
@@ -65,25 +65,25 @@ Ngoài ra, **`PipelineAlertTopicPolicy`** (`AWS::SNS::TopicPolicy`) giới hạn
 ### 3.1. Bug thực tế của Airflow 3 Task SDK đã bắt & vá khi test live
 Khi kiểm thử live Bước 5 trên **Airflow 3.3**, hàm `extract_messages_from_asset_events` ban đầu trả về `[]` khiến task bị skip dù `SqsSensorTrigger` đã phát `TriggerEvent` chứa đủ `message_batch`.
 - **Nguyên nhân gốc:** Trong Airflow 3 Task SDK, `context["triggering_asset_events"]` là một object **`TriggeringAssetEventsAccessor`**, kế thừa từ `collections.abc.Mapping` chứ **không phải `dict`**. Kiểm tra `isinstance(..., dict)` luôn trả về `False`!
-- **Cách khắc phục:** Chuyển sang `isinstance(..., Mapping)` trong [`include/sqs_parser.py`](../include/sqs_parser.py) và bổ sung unit test `test_extract_messages_supports_airflow3_mapping_accessor` trong [`tests/test_sqs_parser.py`](../tests/test_sqs_parser.py) (**15/15 unit tests PASS**).
+- **Cách khắc phục:** Chuyển sang `isinstance(..., Mapping)` trong [`include/sqs_parser.py`](../include/sqs_parser.py) và bổ sung bộ unit test trong [`tests/test_sqs_parser.py`](../tests/test_sqs_parser.py) & [`tests/test_ingestion_guards.py`](../tests/test_ingestion_guards.py) (**20/20 unit tests PASS**).
 
-### 3.2. State Machine của `ops.pipeline_ingestion_audit` & Safe ACK
+### 3.2. State Machine của `ops.pipeline_ingestion_audit`, Two-Phase Staging & Safe ACK
 ```mermaid
 stateDiagram-v2
-    [*] --> SWAPPED: "TEMP TABLE -> Empty Guard(>0) -> DELETE+INSERT commit\n(rows_loaded = staged_rows)"
-    [*] --> FAILED: "COPY error / 0-row Empty-Stage Guard -> rollback()\n(rows_loaded = 0)"
-    SWAPPED --> ARCHIVED: "dbt PASS -> copy S3 raw/ -> archive/<audit_id>/<file>\n(verify check_for_key(dest_key))"
-    ARCHIVED --> COMPLETED: "delete S3 raw/ -> ready for SQS DeleteMessage (ACK)"
+    [*] --> SWAPPED: "CSV Header Guard -> Two-Phase TEMP TABLE(>0)\n-> Same-Tx DELETE+INSERT + SWAPPED (rows_loaded = staged_rows)"
+    [*] --> FAILED: "Header Drift / COPY error / 0-row Guard -> rollback()\n(rows_loaded = 0)"
+    SWAPPED --> ARCHIVED: "dbt PASS -> copy S3 raw/ -> archive/<audit_id>/<file>\n(verify check_for_key(dest_key) + fail-closed audit)"
+    ARCHIVED --> COMPLETED: "delete S3 raw/ -> fail-closed audit COMPLETED"
     FAILED --> [*]: "Retry / MaxReceiveCount=3 -> SQS DLQ -> CloudWatch ALARM"
-    COMPLETED --> [*]: "SQS ACK OK"
+    COMPLETED --> [*]: "Deferred Batch SQS ACK OK"
 ```
 
-1. **Chính xác hóa `rows_loaded`:** Giá trị `rows_loaded = staged_rows` chỉ được ghi với `status = 'SWAPPED'` **sau khi** giao dịch `DELETE + INSERT` vào bảng chính `raw_data.<table>` đã `conn.commit()` thành công; nếu rollback, bảng audit ghi `status = 'FAILED', rows_loaded = 0`. *(Lưu ý: Redshift không enforce `UNIQUE` vật lý, nên bảng audit đóng vai trò Verification Ledger chứ không thay thế distributed lock).*
-2. **Đường dẫn Archive cố định (**Deterministic**):** Thay `archive/<timestamp>/<filename>` bằng `archive/<safe_audit_id>/<filename>` ([`build_deterministic_archive_key`](../include/ingestion_guards.py)) — nếu task chạy lại sau lỗi mạng, file luôn ghi về đúng một khóa duy nhất, không đẻ rác trùng lặp.
-3. **Chặn ACK nhầm (`verify_safe_to_ack_when_raw_missing`):**
-   - Trong [`dags/ecommerce_pipeline_dag.py`](../dags/ecommerce_pipeline_dag.py), trạng thái `ARCHIVED` được ghi **ngay sau khi verify bản sao trong `archive/` và trước khi xóa `raw/`**.
-   - Nếu ở lượt retry mà `raw/` không còn file, code truy vấn trạng thái mới nhất của `audit_id` trong `ops.pipeline_ingestion_audit`: **chỉ cho phép ACK khi `status in {'ARCHIVED', 'COMPLETED'}` VÀ đúng `archive_key` định danh của lượt đó thực sự tồn tại trên S3**. Trạng thái `SWAPPED` hoặc `FAILED` đều bị chặn và raise `RuntimeError`.
-4. **Gia hạn `VisibilityTimeout` (Heartbeat):** Hàm `_refresh_sqs_visibility` gọi `change_message_visibility(VisibilityTimeout=900)` ngay sau khi swap Redshift xong và ngay trước khi archive/ACK để reset đồng hồ 15 phút cho các batch lớn.
+1. **Two-Phase Batch Staging, CSV Header Schema Guard & Giao dịch `SWAPPED` nguyên tử:** Trong [`dags/ecommerce_pipeline_dag.py`](../dags/ecommerce_pipeline_dag.py), Pha A đọc dòng header đầu tiên của file CSV trên S3 đối chiếu với [`EXPECTED_CSV_HEADERS`](../include/ingestion_guards.py) (`validate_csv_header`), nạp vào `TEMP TABLE tmp_stage_<table>` và kiểm tra `ensure_non_empty_stage` (`> 0` dòng) cho **toàn bộ các file trong batch** trước khi đụng vào bất kỳ bảng đích `raw_data.*` nào. Ở Pha B, lệnh `DELETE + INSERT` và lệnh ghi `status = 'SWAPPED'` (`rows_loaded = staged_rows`, fail-closed) được thực thi **trong cùng một transaction `conn.commit()`** (và tách lệnh dọn `DROP TEMP TABLE` sang khối best-effort riêng để không bao giờ ghi nhầm `FAILED` sau khi đã swap).
+2. **Định danh Sự kiện Xuyên DAG Run (`event_token`) & Đường dẫn Archive Cố định:** [`parse_sqs_s3_events`](../include/sqs_parser.py) khóa cứng hợp đồng flat prefix `raw/<allowlisted_filename>.csv` (chặn gộp nhầm subfolder và SQL injection) đồng thời trích xuất `event_token` (`versionId` / `eTag` / `sequencer` / `MessageId`). [`build_audit_id`](../include/ingestion_guards.py) tạo `audit_id` ($\le 256$ ký tự) từ `event_token` để [`build_deterministic_archive_key`](../include/ingestion_guards.py) (`archive/<safe_audit_id>/<filename>`) giữ nguyên bất biến kể cả khi SQS redeliver message sang một DAG Run mới.
+3. **Chặn ACK nhầm ở cả Task 1 & Task 3 (`verify_safe_to_ack_when_raw_missing`) + Deferred Multi-Record ACK:**
+   - Mọi nhánh phát hiện `raw/` không còn file (cả ở Task 1 lẫn Task 3) đều truy vấn `_fetch_latest_audit_status` (có tie-breaker `CASE status ... END DESC`) và gọi `verify_safe_to_ack_when_raw_missing`: **chỉ cho phép ACK khi `status in {'ARCHIVED', 'COMPLETED'}` VÀ đúng `archive_key` thực sự tồn tại trên S3**.
+   - Ở Task 3, thao tác `_delete_sqs_handles` được hoãn tới **sau khi toàn bộ các file trong batch đã hoàn tất archive và ghi audit `COMPLETED`**, bảo vệ tuyệt đối trường hợp 1 SQS message chứa nhiều S3 `Records`.
+4. **Gia hạn `VisibilityTimeout` Fail-Closed (Heartbeat):** Hàm `_refresh_sqs_visibility` gia hạn `VisibilityTimeout=900` sau khi stage/swap và bật `fail_on_error=True` ngay trước khi sửa/xóa S3 ở Task 3 để dừng ngay nếu mất quyền sở hữu message (lost lease).
 
 ---
 

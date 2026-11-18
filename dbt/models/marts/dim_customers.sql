@@ -15,10 +15,33 @@ orders as (
     select * from {{ ref('stg_orders') }}
 ),
 
+payments_by_order as (
+    select
+        p.order_id,
+        sum(p.payment_value) as total_payment
+    from {{ ref('stg_payments') }} p
+    group by p.order_id
+),
+
 {% if is_incremental() %}
--- 1. Xác định tập customer_unique_id có phát sinh đơn mới trong lookback window 3 ngày
---    hoặc có customer_id mới chưa tồn tại trong bảng đích {{ this }}.
---    Phải gom theo customer_unique_id để tính lại toàn bộ chỉ số tích lũy (LTV) không bị thiếu lịch sử!
+current_customer_metrics as (
+    select
+        c.customer_unique_id,
+        count(distinct o.order_id) as total_orders,
+        coalesce(sum(p.total_payment), 0) as lifetime_spend
+    from customers c
+    inner join orders o
+        on c.customer_id = o.customer_id
+    left join payments_by_order p
+        on o.order_id = p.order_id
+    group by c.customer_unique_id
+),
+
+-- 1. Xác định tập customer_unique_id bị ảnh hưởng:
+--    a) Có phát sinh đơn mới trong lookback window 3 ngày,
+--    b) Có customer_id mới chưa tồn tại trong bảng đích {{ this }}, HOẶC
+--    c) Có thay đổi tổng chi tiêu (lifetime_spend), tổng số đơn (total_orders) hoặc địa chỉ (city/state/zip_code)
+--       kể cả khi cập nhật thanh toán trễ (late-arriving payment) trên đơn hàng cũ > 3 ngày!
 affected_customers as (
     select distinct c.customer_unique_id
     from customers c
@@ -38,6 +61,20 @@ affected_customers as (
         from {{ this }} target
         where target.customer_id = c.customer_id
     )
+
+    union
+
+    select distinct c.customer_unique_id
+    from customers c
+    inner join {{ this }} target
+        on c.customer_id = target.customer_id
+    left join current_customer_metrics cm
+        on c.customer_unique_id = cm.customer_unique_id
+    where coalesce(cm.lifetime_spend, 0) <> coalesce(target.lifetime_spend, 0)
+       or coalesce(cm.total_orders, 0) <> coalesce(target.total_orders, 0)
+       or coalesce(c.city, '') <> coalesce(target.city, '')
+       or coalesce(c.state, '') <> coalesce(target.state, '')
+       or coalesce(c.zip_code, '') <> coalesce(target.zip_code, '')
 ),
 
 -- 2. Lấy toàn bộ các customer_id gắn với những customer_unique_id bị ảnh hưởng (cả cũ lẫn mới)
@@ -65,22 +102,6 @@ target_orders as (
 ),
 {% endif %}
 
-payments as (
-    select
-        p.order_id,
-        sum(p.payment_value) as total_payment
-    from {{ ref('stg_payments') }} p
-    {% if is_incremental() %}
-    -- Chỉ quét thanh toán của các đơn hàng thuộc tập khách hàng bị ảnh hưởng
-    where exists (
-        select 1
-        from target_orders ord
-        where ord.order_id = p.order_id
-    )
-    {% endif %}
-    group by p.order_id
-),
-
 customer_orders as (
     select
         tc.customer_unique_id,
@@ -91,7 +112,7 @@ customer_orders as (
     from target_customers tc
     inner join target_orders ord
         on tc.customer_id = ord.customer_id
-    left join payments p
+    left join payments_by_order p
         on ord.order_id = p.order_id
     group by tc.customer_unique_id
 ),

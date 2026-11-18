@@ -43,7 +43,22 @@ aws cloudformation deploy \
 make cfn-deploy ALERT_EMAIL="your-email@example.com"
 make cfn-status
 ```
-> ⚠️ **Lưu ý quan trọng sau khi Deploy:** Mở hộp thư `ALERT_EMAIL` của bạn và bấm **"Confirm subscription"** trong email gửi từ `AWS Notifications` để kích hoạt nhận cảnh báo từ Amazon SNS.
+> ⚠️ **2 Bước quan trọng ngay sau khi Deploy:**
+> 1. **Xác nhận Email SNS:** Mở hộp thư `ALERT_EMAIL` của bạn và bấm **"Confirm subscription"** trong email gửi từ `AWS Notifications` để kích hoạt nhận cảnh báo từ Amazon SNS.
+> 2. **Gắn IAM Role mới vào Redshift Namespace hiện có (khi `DeployRedshift=false`):**
+>    ```bash
+>    ROLE_ARN=$(aws cloudformation describe-stacks \
+>      --stack-name olist-v5-pipeline-stack \
+>      --region us-east-1 \
+>      --query "Stacks[0].Outputs[?OutputKey=='RedshiftS3ReadOnlyRoleArn'].OutputValue" \
+>      --output text)
+>
+>    aws redshift-serverless update-namespace \
+>      --namespace-name "${REDSHIFT_NAMESPACE:-ecommerce-namespace}" \
+>      --iam-roles "$ROLE_ARN" \
+>      --default-iam-role-arn "$ROLE_ARN" \
+>      --region us-east-1
+>    ```
 
 ### 1.4. Cơ chế Rollback Hạ tầng (Infrastructure Rollback)
 * **Tự động Rollback khi Deploy lỗi (Native Auto-Rollback):**
@@ -86,8 +101,9 @@ Hàng đợi chính `*-s3-raw-arrival-queue-*` được cấu hình `RedrivePoli
      --visibility-timeout 30 \
      --region us-east-1
    ```
-2. **Bước 2 — Khắc phục file CSV lỗi trên S3:**
-   Upload đè bản CSV hợp lệ (có dữ liệu `> 0` dòng, đúng cấu trúc cột) lên `s3://<bucket>/raw/<filename>.csv`.
+2. **Bước 2 — Khắc phục theo đúng nguyên nhân gốc (tránh sinh 2 sự kiện S3 trùng lặp):**
+   * **Trường hợp A (Lỗi hạ tầng tạm thời — file trên `raw/` đã hợp lệ, không cần upload lại):** Chuyển thẳng sang **Bước 3** để chạy `start-message-move-task` đẩy message cũ từ DLQ về `SqsMainQueue`.
+   * **Trường hợp B (File CSV rỗng `0` dòng hoặc sai định dạng — cần upload bản CSV mới lên `s3://<bucket>/raw/<filename>.csv`):** Bản thân thao tác upload file mới lên `raw/` sẽ tự động bắn 1 sự kiện `s3:ObjectCreated:*` mới vào `SqsMainQueue`. Khi đó bạn chỉ cần xóa message hỏng cũ trong DLQ (`aws sqs purge-queue --queue-url "$DLQ_URL"`), **hoặc** tạm pause DAG trước khi upload + chạy `start-message-move-task` rồi unpause để cơ chế **Two-Proof Safe ACK Guard** gộp xử lý idempotent.
 3. **Bước 3 — Kích hoạt SQS DLQ Redrive (`StartMessageMoveTask`) để đẩy message ngược về hàng đợi chính:**
    ```bash
    DLQ_ARN=$(aws cloudformation describe-stacks \
@@ -112,11 +128,16 @@ Hàng đợi chính `*-s3-raw-arrival-queue-*` được cấu hình `RedrivePoli
 
 ## 3. Sao lưu & Khôi phục Kho dữ liệu (Redshift Serverless Recovery Points & Snapshots)
 
+> 💡 **Lưu ý tên tài nguyên:** Đặt biến `REDSHIFT_NAMESPACE` / `REDSHIFT_WORKGROUP` theo workgroup đang dùng (`ecommerce-namespace` / `ecommerce-workgroup` khi tái sử dụng từ V4 với `DeployRedshift=false`, hoặc `${ProjectPrefix}-namespace-${EnvironmentName}` / `${ProjectPrefix}-workgroup-${EnvironmentName}` khi tạo mới bằng `DeployRedshift=true`).
+
 * **RPO (Recovery Point Objective):** Amazon Redshift Serverless tự động tạo **Recovery Points** mỗi **30 phút** (lưu giữ trong 24 giờ hoàn toàn miễn phí compute).
 * **Tạo Snapshot thủ công trước khi bảo trì lớn:**
   ```bash
+  REDSHIFT_NAMESPACE="${REDSHIFT_NAMESPACE:-ecommerce-namespace}"
+  REDSHIFT_WORKGROUP="${REDSHIFT_WORKGROUP:-ecommerce-workgroup}"
+
   aws redshift-serverless create-snapshot \
-    --namespace-name ecommerce-namespace \
+    --namespace-name "$REDSHIFT_NAMESPACE" \
     --snapshot-name "olist-pre-upgrade-$(date +%Y%m%d-%H%M)" \
     --retention-period 7 \
     --region us-east-1
@@ -125,7 +146,7 @@ Hàng đợi chính `*-s3-raw-arrival-queue-*` được cấu hình `RedrivePoli
   ```bash
   # 1. Liệt kê các Recovery Points gần nhất trong 24 giờ qua
   aws redshift-serverless list-recovery-points \
-    --namespace-name ecommerce-namespace \
+    --namespace-name "$REDSHIFT_NAMESPACE" \
     --region us-east-1 \
     --query "recoveryPoints[0:5].{Id:recoveryPointId,Time:recoveryPointCreateTime}" \
     --output table
@@ -133,8 +154,8 @@ Hàng đợi chính `*-s3-raw-arrival-queue-*` được cấu hình `RedrivePoli
   # 2. Khôi phục toàn bộ Namespace về đúng mốc Recovery Point đã chọn
   aws redshift-serverless restore-from-recovery-point \
     --recovery-point-id "<RECOVERY_POINT_ID>" \
-    --namespace-name ecommerce-namespace \
-    --workgroup-name ecommerce-workgroup \
+    --namespace-name "$REDSHIFT_NAMESPACE" \
+    --workgroup-name "$REDSHIFT_WORKGROUP" \
     --region us-east-1
   ```
 
@@ -142,15 +163,15 @@ Hàng đợi chính `*-s3-raw-arrival-queue-*` được cấu hình `RedrivePoli
 
 ## 4. Phát lại Sự kiện Dữ liệu từ S3 Archive (S3 Event Replay)
 
-Khi cần chạy lại một lô dữ liệu lịch sử mà không cần upload lại từ máy cá nhân:
+Khi cần chạy lại một lô dữ liệu lịch sử mà không cần upload lại từ máy cá nhân (sử dụng đường dẫn deterministic `archive/<safe_audit_id>/<filename>` được ghi trong bảng `ops.pipeline_ingestion_audit`):
 ```bash
 # Xem danh sách các batch đã archive trên S3
 aws s3 ls s3://$S3_BUCKET_NAME/archive/
 
-# Copy ngược 1 file (hoặc cả batch) từ archive/<timestamp>/ về raw/
+# Copy ngược 1 file (hoặc cả batch) từ archive/<safe_audit_id>/ về raw/
 # S3 sẽ tự động phát sự kiện s3:ObjectCreated:Copy -> SQS -> đánh thức Airflow 3 AssetWatcher!
 aws s3 cp \
-  s3://$S3_BUCKET_NAME/archive/20261113_072547/product_category_name_translation.csv \
+  s3://$S3_BUCKET_NAME/archive/ver_abc123__product_category_name_translation/product_category_name_translation.csv \
   s3://$S3_BUCKET_NAME/raw/product_category_name_translation.csv
 ```
 

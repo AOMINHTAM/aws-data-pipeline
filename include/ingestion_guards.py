@@ -1,13 +1,120 @@
 """
 include/ingestion_guards.py
 Các hàm kiểm tra toàn vẹn dữ liệu trước khi thay thế bảng đích trong Redshift
-và xác minh bằng chứng hoàn tất (Audit ARCHIVED/COMPLETED + Deterministic S3 Archive Key)
-trước khi ACK SQS.
+(CSV Header Schema Guard + Empty-Stage Guard) và xác minh bằng chứng hoàn tất
+(Audit ARCHIVED/COMPLETED + Deterministic S3 Archive Key) trước khi ACK SQS.
 """
 
 import re
 
 VALID_ARCHIVED_AUDIT_STATUSES = frozenset({"ARCHIVED", "COMPLETED"})
+
+# Hợp đồng schema cột CSV chuẩn cho 9 bảng raw_data (khớp 100% với scripts/create_raw_tables.sql)
+EXPECTED_CSV_HEADERS: dict[str, tuple[str, ...]] = {
+    "orders": (
+        "order_id",
+        "customer_id",
+        "order_status",
+        "order_purchase_timestamp",
+        "order_approved_at",
+        "order_delivered_carrier_date",
+        "order_delivered_customer_date",
+        "order_estimated_delivery_date",
+    ),
+    "order_items": (
+        "order_id",
+        "order_item_id",
+        "product_id",
+        "seller_id",
+        "shipping_limit_date",
+        "price",
+        "freight_value",
+    ),
+    "order_payments": (
+        "order_id",
+        "payment_sequential",
+        "payment_type",
+        "payment_installments",
+        "payment_value",
+    ),
+    "order_reviews": (
+        "review_id",
+        "order_id",
+        "review_score",
+        "review_comment_title",
+        "review_comment_message",
+        "review_creation_date",
+        "review_answer_timestamp",
+    ),
+    "customers": (
+        "customer_id",
+        "customer_unique_id",
+        "customer_zip_code_prefix",
+        "customer_city",
+        "customer_state",
+    ),
+    "products": (
+        "product_id",
+        "product_category_name",
+        "product_name_lenght",
+        "product_description_lenght",
+        "product_photos_qty",
+        "product_weight_g",
+        "product_length_cm",
+        "product_height_cm",
+        "product_width_cm",
+    ),
+    "sellers": (
+        "seller_id",
+        "seller_zip_code_prefix",
+        "seller_city",
+        "seller_state",
+    ),
+    "product_category_name_translation": (
+        "product_category_name",
+        "product_category_name_english",
+    ),
+    "geolocation": (
+        "geolocation_zip_code_prefix",
+        "geolocation_lat",
+        "geolocation_lng",
+        "geolocation_city",
+        "geolocation_state",
+    ),
+}
+
+
+def validate_csv_header(
+    header_line: str | None,
+    table_name: str,
+    expected_headers_map: dict[str, tuple[str, ...]] | None = None,
+) -> tuple[str, ...]:
+    """
+    Kiểm tra dòng header của file CSV khớp chính xác về tên cột và thứ tự cột
+    với hợp đồng schema của bảng đích trước khi gọi Redshift COPY (chặn lỗi đảo cột).
+
+    Raises:
+        ValueError: Nếu header rỗng hoặc lệch tên/thứ tự cột so với schema chuẩn.
+    """
+    if expected_headers_map is None:
+        expected_headers_map = EXPECTED_CSV_HEADERS
+
+    raw_line = (header_line or "").lstrip("\ufeff").strip()
+    if not raw_line:
+        raise ValueError(
+            f"CSV header validation failed for raw_data.{table_name}: empty header line."
+        )
+
+    actual_columns = tuple(
+        col.strip().strip('"').strip("'").lower() for col in raw_line.split(",")
+    )
+    expected_columns = expected_headers_map.get(table_name)
+    if expected_columns and actual_columns != expected_columns:
+        raise ValueError(
+            f"CSV header schema drift detected for raw_data.{table_name}: "
+            f"expected {expected_columns}, got {actual_columns}."
+        )
+    return actual_columns
 
 
 def ensure_non_empty_stage(staged_rows: int | None, s3_uri: str, table_name: str) -> int:
@@ -26,16 +133,28 @@ def ensure_non_empty_stage(staged_rows: int | None, s3_uri: str, table_name: str
     return int(staged_rows)
 
 
-def build_audit_id(dag_run_id: str | None, table_name: str) -> str:
-    """Tạo mã định danh audit_id cho cặp (dag_run_id, table_name)."""
-    clean_run_id = (dag_run_id or "manual_run").strip()
-    return f"{clean_run_id}__{table_name}"
+def build_audit_id(
+    dag_run_id: str | None,
+    table_name: str,
+    event_token: str | None = None,
+) -> str:
+    """
+    Tạo mã định danh audit_id giới hạn <= 256 ký tự.
+    Nếu có event_token từ S3 Event (versionId / eTag / sequencer / MessageId),
+    ưu tiên dùng event_token để audit_id bất biến qua mọi lần SQS redelivery
+    sang các DAG Run khác nhau.
+    """
+    clean_table = (table_name or "unknown_table").strip()
+    clean_token = (event_token or "").strip()
+    base_id = clean_token if clean_token else (dag_run_id or "manual_run").strip()
+    max_base_len = max(1, 256 - len(clean_table) - 2)
+    return f"{base_id[:max_base_len]}__{clean_table}"
 
 
 def build_deterministic_archive_key(audit_id: str, filename: str) -> str:
     """
     Tạo đường dẫn archive cố định (deterministic) theo audit_id để khi task retry
-    không sinh ra nhiều bản sao archive trùng lặp ở các timestamp khác nhau.
+    hoặc SQS redeliver không sinh ra nhiều bản sao archive trùng lặp.
     """
     safe_audit_id = re.sub(r"[^a-zA-Z0-9_.-]+", "_", (audit_id or "manual_run").strip())
     clean_filename = filename.strip().lstrip("/")
@@ -51,10 +170,10 @@ def verify_safe_to_ack_when_raw_missing(
 ) -> bool:
     """
     Chặn ACK SQS nhầm khi file trên s3://.../raw/ không còn tồn tại.
-    Chỉ cho phép ACK nếu có đủ bằng chứng của ĐÚNG lượt chạy hiện tại:
+    Chỉ cho phép ACK nếu có đủ bằng chứng:
       1. Bảng ops.pipeline_ingestion_audit đã ghi nhận trạng thái ARCHIVED hoặc COMPLETED
          (trạng thái SWAPPED chưa đủ vì chứng tỏ file biến mất trước khi copy sang archive/).
-      2. Đường dẫn archive_key khớp với expected_archive_key của audit_id hiện tại.
+      2. Đường dẫn archive_key khớp với expected_archive_key của event/audit_id hiện tại.
       3. File bản sao thực sự tồn tại tại archive_key trên S3.
 
     Raises:

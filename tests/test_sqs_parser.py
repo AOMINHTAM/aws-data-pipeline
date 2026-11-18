@@ -1,6 +1,7 @@
 """
 tests/test_sqs_parser.py
-Unit tests kiểm thử logic phân tích cú pháp SQS Message và định tuyến file S3.
+Unit tests kiểm thử logic phân tích cú pháp SQS Message, định tuyến file S3,
+kiểm tra hợp đồng prefix raw/<filename>, event_token và deduplication theo MessageId.
 """
 
 from collections.abc import Mapping
@@ -18,6 +19,7 @@ class TestSqsParser(unittest.TestCase):
 
     def test_parse_valid_s3_object_created(self):
         msg = {
+            "MessageId": "m-orders-1",
             "ReceiptHandle": "handle_orders_123",
             "Body": json.dumps({
                 "Records": [
@@ -27,14 +29,22 @@ class TestSqsParser(unittest.TestCase):
                         "eventName": "ObjectCreated:Put",
                         "s3": {
                             "bucket": {"name": "olist-raw-data-amt"},
-                            "object": {"key": "raw/olist_orders_dataset.csv", "size": 17654914},
+                            "object": {
+                                "key": "raw/olist_orders_dataset.csv",
+                                "size": 17654914,
+                                "versionId": "v12345",
+                                "eTag": "etag999",
+                                "sequencer": "0055AED6DCD90281E5",
+                            },
                         },
                     }
                 ]
             }),
         }
 
-        valid_files, test_handles = parse_sqs_s3_events([msg])
+        valid_files, test_handles = parse_sqs_s3_events(
+            [msg], expected_bucket="olist-raw-data-amt"
+        )
         self.assertEqual(len(valid_files), 1)
         self.assertEqual(len(test_handles), 0)
 
@@ -43,6 +53,8 @@ class TestSqsParser(unittest.TestCase):
         self.assertEqual(item["s3_key"], "raw/olist_orders_dataset.csv")
         self.assertEqual(item["table_name"], "orders")
         self.assertEqual(item["receipt_handles"], ["handle_orders_123"])
+        self.assertEqual(item["event_token"], "ver_v12345")
+        self.assertEqual(item["version_id"], "v12345")
 
     def test_parse_multiple_files_in_batch(self):
         msg1 = {
@@ -180,6 +192,91 @@ class TestSqsParser(unittest.TestCase):
         )
         self.assertEqual(len(valid_files), 0)
         self.assertEqual(len(test_handles), 0)
+
+    def test_reject_subfolder_collisions_wrong_bucket_and_special_char_keys(self):
+        # Chặn gộp nhầm subfolder (raw/batch_1/orders.csv), sai bucket hoặc key chứa dấu nháy đơn
+        subfolder_msg = {
+            "ReceiptHandle": "h-sub",
+            "Body": json.dumps({
+                "Records": [
+                    {
+                        "eventSource": "aws:s3",
+                        "eventName": "ObjectCreated:Put",
+                        "s3": {
+                            "bucket": {"name": "expected-bucket"},
+                            "object": {"key": "raw/batch_01/olist_orders_dataset.csv"},
+                        },
+                    }
+                ]
+            }),
+        }
+        sql_inj_msg = {
+            "ReceiptHandle": "h-inj",
+            "Body": json.dumps({
+                "Records": [
+                    {
+                        "eventSource": "aws:s3",
+                        "eventName": "ObjectCreated:Put",
+                        "s3": {
+                            "bucket": {"name": "expected-bucket"},
+                            "object": {"key": "raw/bad'quote/olist_orders_dataset.csv"},
+                        },
+                    }
+                ]
+            }),
+        }
+        wrong_bucket_msg = {
+            "ReceiptHandle": "h-wrong-bkt",
+            "Body": json.dumps({
+                "Records": [
+                    {
+                        "eventSource": "aws:s3",
+                        "eventName": "ObjectCreated:Put",
+                        "s3": {
+                            "bucket": {"name": "other-bucket"},
+                            "object": {"key": "raw/olist_orders_dataset.csv"},
+                        },
+                    }
+                ]
+            }),
+        }
+        valid_files, _ = parse_sqs_s3_events(
+            [subfolder_msg, sql_inj_msg, wrong_bucket_msg],
+            expected_bucket="expected-bucket",
+        )
+        self.assertEqual(len(valid_files), 0)
+
+    def test_deduplicate_same_message_id_with_new_receipt_handle_preserves_both_handles(self):
+        msg_first_delivery = {
+            "MessageId": "msg-same-100",
+            "ReceiptHandle": "rh-old-1",
+            "Body": json.dumps({
+                "Records": [
+                    {
+                        "eventSource": "aws:s3",
+                        "eventName": "ObjectCreated:Put",
+                        "s3": {"object": {"key": "raw/olist_orders_dataset.csv"}},
+                    }
+                ]
+            }),
+        }
+        msg_redelivery = {
+            "MessageId": "msg-same-100",
+            "ReceiptHandle": "rh-new-2",
+            "Body": msg_first_delivery["Body"],
+        }
+
+        deduped = deduplicate_sqs_messages([msg_first_delivery, msg_redelivery])
+        self.assertEqual(len(deduped), 1)
+        self.assertEqual(deduped[0]["ReceiptHandle"], "rh-new-2")
+        self.assertEqual(deduped[0]["ReceiptHandles"], ["rh-old-1", "rh-new-2"])
+
+        valid_files, _ = parse_sqs_s3_events(deduped)
+        self.assertEqual(len(valid_files), 1)
+        self.assertEqual(
+            valid_files[0]["receipt_handles"],
+            ["rh-old-1", "rh-new-2"],
+        )
 
     def test_extract_messages_from_asset_events_and_deduplicate(self):
         sqs_msg = {

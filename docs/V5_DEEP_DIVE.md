@@ -22,21 +22,21 @@ By **V4 (`v4.0.1`)**, the Data Engineering core was complete (zero-cron Airflow 
 
 ## 2. CloudFormation IaC Anatomy (`infra/cloudformation/template.yaml`)
 
-[`infra/cloudformation/template.yaml`](../infra/cloudformation/template.yaml) provisions **14 core resources**, **4 conditional FinOps/VPC Redshift resources**, and **16 stack Outputs**.
+[`infra/cloudformation/template.yaml`](../infra/cloudformation/template.yaml) provisions **15 core resources** (including `S3RawBucketPolicy` enforcing HTTPS-only transport), **4 conditional FinOps/VPC Redshift resources**, and **16 stack Outputs**.
 
 ### 2.1. Breaking Dual Circular Dependencies (S3 ↔ SQS Main Queue ↔ DLQ)
 1. **S3 Bucket ↔ SQS Queue Policy:** `S3RawBucket` validates its `NotificationConfiguration` immediately upon creation (sending `s3:TestEvent`), so `SqsMainQueuePolicy` must exist first (`DependsOn: SqsMainQueuePolicy`). To prevent a circular reference, `SqsMainQueuePolicy` constructs the bucket ARN with `!Sub` instead of `!GetAtt S3RawBucket.Arn`.
 2. **SQS Main Queue ↔ SQS DLQ:** `SqsMainQueue.RedrivePolicy` references `!GetAtt SqsDeadLetterQueue.Arn`. To add `RedriveAllowPolicy` (`byQueue`) on `SqsDeadLetterQueue` without creating a reverse cycle, the DLQ constructs the main queue ARN via `!Sub`.
 
 ### 2.2. Versioned S3 Storage, Lifecycle & Safe Stack Tear-Down
-- **Security & Naming:** Enables `AES256` SSE, all four `PublicAccessBlockConfiguration` flags, and constrains `ProjectPrefix` to `3–16` chars (`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`) so the generated bucket name always stays well under AWS's 63-character limit.
-- **Versioning & Lifecycle:** Enables `VersioningConfiguration: Enabled`, expires `archive/` after 90 days, and expires noncurrent object versions after 30 days.
-- **Preventing `DELETE_FAILED` on Versioned Buckets:** Standard `aws s3 rm --recursive` only writes delete markers on versioned buckets. [`scripts/empty_versioned_bucket.py`](../scripts/empty_versioned_bucket.py) removes all `Versions` and `DeleteMarkers` in batches of 500 before `make cfn-delete` calls `aws cloudformation delete-stack`.
+- **Security & Naming:** Enables `AES256` SSE, all four `PublicAccessBlockConfiguration` flags, `S3RawBucketPolicy` (`Deny` when `aws:SecureTransport: "false"`), and constrains `ProjectPrefix` to `3–16` chars (`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`) so the generated bucket name always stays well under AWS's 63-character limit.
+- **Versioning & Lifecycle:** Enables `VersioningConfiguration: Enabled`, expires `archive/` after 90 days, expires noncurrent object versions after 30 days, purges orphan delete markers via `ExpiredObjectDeleteMarker: true`, and cleans up incomplete multipart uploads after 7 days (`AbortIncompleteMultipartUpload`).
+- **Preventing `DELETE_FAILED` on Versioned Buckets:** Standard `aws s3 rm --recursive` only writes delete markers on versioned buckets. [`scripts/empty_versioned_bucket.py`](../scripts/empty_versioned_bucket.py) loops across all paginated `list-object-versions` responses to purge all `Versions` and `DeleteMarkers` in batches of 500 before `make cfn-delete` calls `aws cloudformation delete-stack`.
 
-### 2.3. Split Least-Privilege IAM (3 Distinct Roles/Policies)
-- **`RedshiftS3ReadOnlyRole`:** STS `AssumeRole` restricted by `aws:SourceAccount`, granting `s3:ListBucket` (`s3:prefix: ["raw/*", "raw"]`) and `s3:GetObject`/`GetObjectVersion` strictly on `raw/*` (cannot read `archive/`).
-- **`AirflowRuntimePolicy`:** Attached to `AirflowPrincipalUserName`; grants SQS consume/ACK/visibility actions strictly on `SqsMainQueue`, `GET/DELETE` on `raw/*`, and `GET/PUT` (**no `DELETE`**) on `archive/*`.
-- **`DlqOperatorPolicy`:** Isolates DLQ inspection and `StartMessageMoveTask` / `CancelMessageMoveTask` / `ListMessageMoveTasks` + `SendMessage` back to `SqsMainQueue`.
+### 2.3. Split Least-Privilege IAM (3 Distinct Region-Scoped Roles/Policies)
+- **`RedshiftS3ReadOnlyRole` (`*-${AWS::Region}`):** STS `AssumeRole` restricted by `aws:SourceAccount`, granting `s3:ListBucket` (`s3:prefix: ["raw/*", "raw"]`) and `s3:GetObject`/`GetObjectVersion` strictly on `raw/*` (cannot read `archive/`).
+- **`AirflowRuntimePolicy` (`*-${AWS::Region}`):** Optionally attached to `AirflowPrincipalUserName` (`Default: ""` for fresh-account portability); grants SQS consume/ACK/visibility actions strictly on `SqsMainQueue`, `GET/DELETE` on `raw/*`, and `GET/PUT` (**no `DELETE`**) on `archive/*`.
+- **`DlqOperatorPolicy` (`*-${AWS::Region}`):** Optionally attached to a separate `DlqOperatorUserName` (`Default: ""`, enforcing principal-level Separation of Duties); isolates DLQ inspection and `StartMessageMoveTask` / `CancelMessageMoveTask` / `ListMessageMoveTasks` + `SendMessage` back to `SqsMainQueue`.
 
 ### 2.4. Four CloudWatch Alarms & `PipelineAlertTopicPolicy`
 All four alarms set `TreatMissingData: notBreaching` and publish both `AlarmActions` and `OKActions` through `PipelineAlertTopicPolicy` (which restricts `sns:Publish` to `cloudwatch.amazonaws.com` scoped by `aws:SourceAccount` and `aws:SourceArn`):
@@ -59,13 +59,13 @@ All four alarms set `TreatMissingData: notBreaching` and publish both `AlarmActi
 ### 3.1. Real Airflow 3 Task SDK Bug Caught Live
 During live Bước 5 testing on Airflow 3.3, `extract_messages_from_asset_events` initially returned `[]` and skipped the run even though `SqsSensorTrigger` emitted a valid `TriggerEvent`:
 - **Root Cause:** In Airflow 3 Task SDK, `context["triggering_asset_events"]` is a `TriggeringAssetEventsAccessor` (subclass of `collections.abc.Mapping`, **not `dict`**), so `isinstance(..., dict)` returned `False`.
-- **Fix:** Updated [`include/sqs_parser.py`](../include/sqs_parser.py) to check `collections.abc.Mapping` and added a dedicated unit test in [`tests/test_sqs_parser.py`](../tests/test_sqs_parser.py) (**15/15 unit tests passing**).
+- **Fix:** Updated [`include/sqs_parser.py`](../include/sqs_parser.py) to check `collections.abc.Mapping` and added dedicated unit tests in [`tests/test_sqs_parser.py`](../tests/test_sqs_parser.py) and [`tests/test_ingestion_guards.py`](../tests/test_ingestion_guards.py) (**20/20 unit tests passing**).
 
-### 3.2. `ops.pipeline_ingestion_audit`, Deterministic Archive & Safe ACK
-1. **Accurate `rows_loaded` Accounting:** [`dags/ecommerce_pipeline_dag.py`](../dags/ecommerce_pipeline_dag.py) records `SWAPPED` (`rows_loaded = staged_rows`) **only after** `DELETE + INSERT` commits on `raw_data.<table>`; any `COPY` failure or `Empty-Stage Guard` rejection rolls back and logs `FAILED` (`rows_loaded = 0`). *(Redshift does not enforce physical `UNIQUE` constraints, so the audit table serves strictly as a verification ledger, not a distributed concurrency lock).*
-2. **Deterministic Archive Keys:** [`build_deterministic_archive_key`](../include/ingestion_guards.py) maps every run's file to `archive/<safe_audit_id>/<filename>`, preventing duplicate timestamped archive folders across retries.
-3. **Two-Proof Safe ACK Guard:** `archive_and_ack_sqs_messages` records `ARCHIVED` immediately after verifying `dest_key` exists in S3 and **before** deleting `raw/`. On retry when `raw/` is absent, [`verify_safe_to_ack_when_raw_missing`](../include/ingestion_guards.py) allows SQS ACK **only if** the latest audit row is `ARCHIVED` or `COMPLETED` **and** the exact deterministic `archive_key` exists on S3.
-4. **Visibility Refresh Heartbeat:** `_refresh_sqs_visibility` extends `VisibilityTimeout` to `900s` immediately after Redshift swap and prior to archival/ACK.
+### 3.2. `ops.pipeline_ingestion_audit`, Two-Phase Batch Staging, Deterministic Archive & Safe ACK
+1. **Two-Phase Batch Staging, CSV Header Guard & Same-Transaction `SWAPPED` Audit:** [`dags/ecommerce_pipeline_dag.py`](../dags/ecommerce_pipeline_dag.py) first validates the CSV header row against [`EXPECTED_CSV_HEADERS`](../include/ingestion_guards.py) (`validate_csv_header`), stages every file in the batch into `TEMP TABLE tmp_stage_<table>`, and verifies `ensure_non_empty_stage` (`> 0` rows) **before** touching any target table in `raw_data.*`. Once all files in the batch pass staging, Phase B executes `DELETE + INSERT` and records `SWAPPED` (`rows_loaded = staged_rows`, fail-closed) **inside the same Redshift transaction**.
+2. **Cross-Run Event Identity & Deterministic Archive Keys:** [`parse_sqs_s3_events`](../include/sqs_parser.py) enforces the strict flat key contract `raw/<allowlisted_filename>.csv` (blocking subfolder collisions and SQL injection) and extracts an immutable `event_token` (`versionId` / `eTag` / `sequencer` / `MessageId`). [`build_audit_id`](../include/ingestion_guards.py) derives `audit_id` (capped at $\le 256$ chars) from `event_token` so [`build_deterministic_archive_key`](../include/ingestion_guards.py) (`archive/<safe_audit_id>/<filename>`) remains identical even if SQS redelivers a message to a brand-new DAG Run.
+3. **Two-Proof Safe ACK Guard (Task 1 & Task 3) & Deferred Multi-Record ACK:** Both Task 1 (`load_raw_from_sqs`) and Task 3 (`archive_and_ack_sqs_messages`) enforce [`verify_safe_to_ack_when_raw_missing`](../include/ingestion_guards.py) whenever `raw/<file>` is absent — permitting SQS ACK **only if** the latest audit row (ordered deterministically with a status-rank tie-breaker) is `ARCHIVED` or `COMPLETED` **and** the deterministic `archive_key` exists on S3. Task 3 defers `_delete_sqs_handles` until **all** files in the batch have completed archival and audit writes, protecting multi-record SQS messages from premature ACK.
+4. **Fail-Closed Visibility Refresh Heartbeat:** `_refresh_sqs_visibility` extends `VisibilityTimeout` to `900s` after staging/swapping and enforces `fail_on_error=True` prior to S3 archival/deletion so a consumer that lost its SQS lease aborts immediately.
 
 ---
 

@@ -9,6 +9,9 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
 jobs:
   # Job 1: Kiểm tra cú pháp Python, lint (Ruff) và chạy toàn bộ Unit Tests (chỉ mất ~15s)
   lint-and-unit-tests:

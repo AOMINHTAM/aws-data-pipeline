@@ -42,7 +42,22 @@ aws cloudformation deploy \
 make cfn-deploy ALERT_EMAIL="your-email@example.com"
 make cfn-status
 ```
-> ⚠️ **Post-Deploy Action:** Open your `ALERT_EMAIL` inbox and click **"Confirm subscription"** in the message from `AWS Notifications` so Amazon SNS can deliver alarm emails.
+> ⚠️ **Post-Deploy Actions:**
+> 1. **Confirm SNS Email:** Open your `ALERT_EMAIL` inbox and click **"Confirm subscription"** in the message from `AWS Notifications` so Amazon SNS can deliver alarm emails.
+> 2. **Associate IAM Role with Existing Redshift Namespace (when `DeployRedshift=false`):**
+>    ```bash
+>    ROLE_ARN=$(aws cloudformation describe-stacks \
+>      --stack-name olist-v5-pipeline-stack \
+>      --region us-east-1 \
+>      --query "Stacks[0].Outputs[?OutputKey=='RedshiftS3ReadOnlyRoleArn'].OutputValue" \
+>      --output text)
+>
+>    aws redshift-serverless update-namespace \
+>      --namespace-name "${REDSHIFT_NAMESPACE:-ecommerce-namespace}" \
+>      --iam-roles "$ROLE_ARN" \
+>      --default-iam-role-arn "$ROLE_ARN" \
+>      --region us-east-1
+>    ```
 
 ### 1.4. Infrastructure Rollback Procedures
 * **Native Automatic Rollback:** If any resource fails during creation or update, AWS CloudFormation automatically transitions to `ROLLBACK_IN_PROGRESS` / `UPDATE_ROLLBACK_IN_PROGRESS` and restores the stack to its previous clean state.
@@ -84,7 +99,14 @@ aws sqs receive-message \
   --visibility-timeout 30 \
   --region us-east-1
 
-# 2. Upload the corrected CSV to s3://<bucket>/raw/<filename>.csv
+# 2. Recover based on failure root cause (Avoiding Duplicate S3 Events):
+#    - CASE A (Transient infra error — file in raw/ is already valid, no re-upload needed):
+#      Simply run `start-message-move-task` below to redrive the original event from DLQ.
+#    - CASE B (Corrupt/0-row CSV — requires uploading a corrected CSV to s3://<bucket>/raw/<filename>.csv):
+#      Uploading a new object to raw/ automatically emits a fresh s3:ObjectCreated:* event to SqsMainQueue.
+#      Either purge the obsolete poison message from the DLQ (`aws sqs purge-queue --queue-url "$DLQ_URL"`),
+#      OR pause the DAG before uploading + running `start-message-move-task` so both handles coalesce
+#      cleanly under the Two-Proof Safe ACK Guard.
 
 # 3. Trigger SQS DLQ Redrive back to the main queue
 DLQ_ARN=$(aws cloudformation describe-stacks \
@@ -109,11 +131,16 @@ aws sqs start-message-move-task \
 
 ## 3. Data Warehouse Backup & Restore (Redshift Serverless Recovery Points & Snapshots)
 
+> 💡 **Naming Note:** Set `REDSHIFT_NAMESPACE` / `REDSHIFT_WORKGROUP` to your active Redshift resources (`ecommerce-namespace` / `ecommerce-workgroup` when reusing V4 with `DeployRedshift=false`, or `${ProjectPrefix}-namespace-${EnvironmentName}` / `${ProjectPrefix}-workgroup-${EnvironmentName}` when provisioned via `DeployRedshift=true`).
+
 * **Automatic Recovery Points (RPO = 30 min):** Redshift Serverless automatically creates recovery points every 30 minutes and retains them for 24 hours.
 * **Create a Manual Snapshot Before Major Changes:**
   ```bash
+  REDSHIFT_NAMESPACE="${REDSHIFT_NAMESPACE:-ecommerce-namespace}"
+  REDSHIFT_WORKGROUP="${REDSHIFT_WORKGROUP:-ecommerce-workgroup}"
+
   aws redshift-serverless create-snapshot \
-    --namespace-name ecommerce-namespace \
+    --namespace-name "$REDSHIFT_NAMESPACE" \
     --snapshot-name "olist-pre-upgrade-$(date +%Y%m%d-%H%M)" \
     --retention-period 7 \
     --region us-east-1
@@ -121,15 +148,15 @@ aws sqs start-message-move-task \
 * **Restore from a Recovery Point:**
   ```bash
   aws redshift-serverless list-recovery-points \
-    --namespace-name ecommerce-namespace \
+    --namespace-name "$REDSHIFT_NAMESPACE" \
     --region us-east-1 \
     --query "recoveryPoints[0:5].{Id:recoveryPointId,Time:recoveryPointCreateTime}" \
     --output table
 
   aws redshift-serverless restore-from-recovery-point \
     --recovery-point-id "<RECOVERY_POINT_ID>" \
-    --namespace-name ecommerce-namespace \
-    --workgroup-name ecommerce-workgroup \
+    --namespace-name "$REDSHIFT_NAMESPACE" \
+    --workgroup-name "$REDSHIFT_WORKGROUP" \
     --region us-east-1
   ```
 
@@ -137,13 +164,13 @@ aws sqs start-message-move-task \
 
 ## 4. S3 Archive Event Replay
 
-To re-process any historical batch without re-uploading from a local machine:
+To re-process any historical batch without re-uploading from a local machine (using the deterministic `archive/<safe_audit_id>/<filename>` path recorded in `ops.pipeline_ingestion_audit`):
 ```bash
 aws s3 ls s3://$S3_BUCKET_NAME/archive/
 
-# Copy back from archive/<timestamp>/ to raw/ -> triggers s3:ObjectCreated:Copy -> SQS -> Airflow 3
+# Copy back from archive/<safe_audit_id>/ to raw/ -> triggers s3:ObjectCreated:Copy -> SQS -> Airflow 3
 aws s3 cp \
-  s3://$S3_BUCKET_NAME/archive/20261113_072547/product_category_name_translation.csv \
+  s3://$S3_BUCKET_NAME/archive/ver_abc123__product_category_name_translation/product_category_name_translation.csv \
   s3://$S3_BUCKET_NAME/raw/product_category_name_translation.csv
 ```
 

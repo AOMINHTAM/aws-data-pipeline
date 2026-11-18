@@ -22,27 +22,54 @@ CSV_TO_RAW_TABLE = {
 }
 
 
+def _extract_event_token(object_data: Mapping[str, Any], message_id: str = "") -> str:
+    """
+    Trích xuất định danh sự kiện S3 bất biến (ưu tiên versionId -> eTag -> sequencer -> MessageId)
+    để giữ audit_id và deterministic archive key ổn định qua mọi lần SQS redelivery.
+    """
+    version_id = str(object_data.get("versionId") or "").strip()
+    if version_id and version_id.lower() != "null":
+        return f"ver_{version_id}"
+
+    etag = str(object_data.get("eTag") or "").strip().strip('"')
+    if etag:
+        return f"etag_{etag}"
+
+    sequencer = str(object_data.get("sequencer") or "").strip()
+    if sequencer:
+        return f"seq_{sequencer}"
+
+    clean_msg_id = (message_id or "").strip()
+    if clean_msg_id:
+        return f"msg_{clean_msg_id}"
+
+    return ""
+
+
 def parse_sqs_s3_events(
     messages: list[dict[str, Any]],
     table_mapping: dict[str, str] | None = None,
+    expected_bucket: str | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """
     Phân tích danh sách message nhận từ SQS:
     - Lọc bỏ các message lỗi cú pháp hoặc không liên quan.
     - Nhận diện `s3:TestEvent` để xóa ngay.
     - Bóc tách `s3.object.key` cho các sự kiện `ObjectCreated:*`.
-    - Decode URL-encoded key (ví dụ khoảng trắng, ký tự đặc biệt).
-    - Gom nhóm theo filename và lưu toàn bộ `ReceiptHandle` tương ứng để ACK sau.
+    - Kiểm tra `expected_bucket` (nếu cấu hình) và khóa cứng flat prefix `raw/<filename>`
+      để chặn gộp nhầm subfolder và loại bỏ hoàn toàn nguy cơ SQL injection qua S3 key.
+    - Trích xuất `event_token` (`versionId`/`eTag`/`sequencer`) phục vụ cross-run Safe ACK.
 
     Returns:
         tuple (valid_files, test_event_handles)
-        - valid_files: Danh sách dict [{'s3_key', 'filename', 'table_name', 'receipt_handles'}]
+        - valid_files: Danh sách dict [{'s3_key', 'filename', 'table_name',
+          'receipt_handles', 'event_token', 'version_id', 'etag', 'sequencer'}]
         - test_event_handles: Danh sách ReceiptHandle của s3:TestEvent cần xóa ngay
     """
     if table_mapping is None:
         table_mapping = CSV_TO_RAW_TABLE
 
-    files_by_name: dict[str, dict[str, Any]] = {}
+    files_by_key: dict[str, dict[str, Any]] = {}
     test_event_handles: list[str] = []
 
     for msg in messages:
@@ -50,6 +77,14 @@ def parse_sqs_s3_events(
             continue
 
         receipt_handle = msg.get("ReceiptHandle")
+        extra_handles = msg.get("ReceiptHandles")
+        msg_handles: list[str] = []
+        if isinstance(extra_handles, list):
+            msg_handles.extend(h for h in extra_handles if isinstance(h, str) and h)
+        if isinstance(receipt_handle, str) and receipt_handle and receipt_handle not in msg_handles:
+            msg_handles.append(receipt_handle)
+
+        message_id = str(msg.get("MessageId") or "").strip()
         body_raw = msg.get("Body")
 
         if not body_raw:
@@ -65,8 +100,9 @@ def parse_sqs_s3_events(
 
         # 1. Phát hiện s3:TestEvent (S3 tự gửi khi bật notification để test kết nối)
         if body.get("Event") == "s3:TestEvent":
-            if receipt_handle:
-                test_event_handles.append(receipt_handle)
+            for handle in msg_handles:
+                if handle not in test_event_handles:
+                    test_event_handles.append(handle)
             continue
 
         # 2. Xử lý danh sách Records của S3 Event
@@ -86,8 +122,23 @@ def parse_sqs_s3_events(
                 continue
 
             s3_data = record.get("s3", {})
+            if not isinstance(s3_data, Mapping):
+                continue
+
+            bucket_info = s3_data.get("bucket", {})
+            bucket_name = (
+                str(bucket_info.get("name") or "").strip()
+                if isinstance(bucket_info, Mapping)
+                else ""
+            )
+            if expected_bucket and bucket_name and bucket_name != expected_bucket:
+                continue
+
             object_data = s3_data.get("object", {})
-            raw_key = object_data.get("key", "")
+            if not isinstance(object_data, Mapping):
+                continue
+
+            raw_key = str(object_data.get("key") or "")
             if not raw_key:
                 continue
 
@@ -98,23 +149,42 @@ def parse_sqs_s3_events(
                 continue
 
             filename = s3_key.rsplit("/", 1)[-1]
-            if filename in table_mapping:
-                table_name = table_mapping[filename]
-                if filename not in files_by_name:
-                    files_by_name[filename] = {
-                        "s3_key": s3_key,
-                        "filename": filename,
-                        "table_name": table_name,
-                        "receipt_handles": [],
-                    }
+            # Khóa cứng hợp đồng flat prefix `raw/<allowlisted_filename>`
+            if filename not in table_mapping or s3_key != f"raw/{filename}":
+                continue
 
-                if (
-                    receipt_handle
-                    and receipt_handle not in files_by_name[filename]["receipt_handles"]
-                ):
-                    files_by_name[filename]["receipt_handles"].append(receipt_handle)
+            table_name = table_mapping[filename]
+            event_token = _extract_event_token(object_data, message_id=message_id)
+            version_id = str(object_data.get("versionId") or "").strip()
+            etag = str(object_data.get("eTag") or "").strip().strip('"')
+            sequencer = str(object_data.get("sequencer") or "").strip()
 
-    return list(files_by_name.values()), test_event_handles
+            if s3_key not in files_by_key:
+                files_by_key[s3_key] = {
+                    "s3_key": s3_key,
+                    "filename": filename,
+                    "table_name": table_name,
+                    "receipt_handles": [],
+                    "event_token": event_token,
+                    "version_id": version_id,
+                    "etag": etag,
+                    "sequencer": sequencer,
+                }
+            else:
+                if event_token:
+                    files_by_key[s3_key]["event_token"] = event_token
+                if version_id:
+                    files_by_key[s3_key]["version_id"] = version_id
+                if etag:
+                    files_by_key[s3_key]["etag"] = etag
+                if sequencer:
+                    files_by_key[s3_key]["sequencer"] = sequencer
+
+            for handle in msg_handles:
+                if handle not in files_by_key[s3_key]["receipt_handles"]:
+                    files_by_key[s3_key]["receipt_handles"].append(handle)
+
+    return list(files_by_key.values()), test_event_handles
 
 
 def extract_messages_from_asset_events(triggering_asset_events: Any) -> list[dict[str, Any]]:
@@ -155,21 +225,41 @@ def extract_messages_from_asset_events(triggering_asset_events: Any) -> list[dic
 
 
 def deduplicate_sqs_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Loại bỏ các SQS message trùng lặp theo ReceiptHandle / MessageId khi gộp từ nhiều nguồn."""
-    unique_messages: list[dict[str, Any]] = []
-    seen_keys: set[str] = set()
+    """
+    Loại bỏ các SQS message trùng lặp:
+    - Ưu tiên định danh theo `MessageId` (để nhận diện cùng 1 logical message bị nhận 2 lần
+      với 2 `ReceiptHandle` khác nhau), đồng thời gộp toàn bộ `ReceiptHandle` vào `ReceiptHandles`
+      để bước ACK dọn sạch mọi handle đang mở.
+    """
+    unique_by_key: dict[str, dict[str, Any]] = {}
 
     for msg in messages:
         if not isinstance(msg, dict):
             continue
+
         dedup_key = (
-            msg.get("ReceiptHandle")
-            or msg.get("MessageId")
+            msg.get("MessageId")
+            or msg.get("ReceiptHandle")
             or json.dumps(msg, sort_keys=True, default=str)
         )
-        if dedup_key in seen_keys:
-            continue
-        seen_keys.add(dedup_key)
-        unique_messages.append(msg)
+        handle = msg.get("ReceiptHandle")
 
-    return unique_messages
+        if dedup_key not in unique_by_key:
+            msg_copy = dict(msg)
+            existing_handles = list(msg_copy.get("ReceiptHandles") or [])
+            if isinstance(handle, str) and handle and handle not in existing_handles:
+                existing_handles.append(handle)
+            if existing_handles:
+                msg_copy["ReceiptHandles"] = existing_handles
+            unique_by_key[dedup_key] = msg_copy
+        else:
+            stored = unique_by_key[dedup_key]
+            handles = list(stored.get("ReceiptHandles") or [])
+            if isinstance(handle, str) and handle:
+                if handle not in handles:
+                    handles.append(handle)
+                stored["ReceiptHandle"] = handle
+            if handles:
+                stored["ReceiptHandles"] = handles
+
+    return list(unique_by_key.values())

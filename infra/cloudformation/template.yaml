@@ -17,6 +17,7 @@ Metadata:
           - ProjectPrefix
           - EnvironmentName
           - AirflowPrincipalUserName
+          - DlqOperatorUserName
       - Label:
           default: "2. Observability & FinOps Guardrails (CloudWatch, SNS & AWS Budgets)"
         Parameters:
@@ -59,11 +60,19 @@ Parameters:
 
   AirflowPrincipalUserName:
     Type: String
-    Default: de-ecommerce-dev
+    Default: ""
     Description: >-
       (Optional) Existing IAM User name running local/containerized Airflow (e.g. 'de-ecommerce-dev')
-      to automatically attach AirflowRuntimePolicy and DlqOperatorPolicy. Leave blank to create
-      standalone ManagedPolicies without user attachment.
+      to automatically attach AirflowRuntimePolicy. Defaults to blank ("") so the stack deploys
+      reproducibly on any fresh AWS account without pre-existing IAM users.
+
+  DlqOperatorUserName:
+    Type: String
+    Default: ""
+    Description: >-
+      (Optional) Separate existing IAM User name for incident recovery to attach DlqOperatorPolicy
+      (enforcing principal-level Separation of Duties from AirflowPrincipalUserName). Leave blank
+      to create a standalone ManagedPolicy without user attachment.
 
   AlertEmail:
     Type: String
@@ -160,13 +169,14 @@ Parameters:
   AuthorizedCidrIp:
     Type: String
     Default: "127.0.0.1/32"
-    AllowedPattern: "^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$"
+    AllowedPattern: "^([0-9]{1,3}\\.){3}[0-9]{1,3}/32$"
     Description: >-
-      Authorized CIDR block (e.g. your public IP '<ip>/32') for inbound Redshift port 5439.
+      Strict /32 authorized CIDR block (e.g. your public IP '<ip>/32') for inbound Redshift port 5439.
       Defaults to loopback '127.0.0.1/32' (closed by default, never 0.0.0.0/0).
 
 Conditions:
   HasAirflowPrincipalUser: !Not [!Equals [!Ref AirflowPrincipalUserName, ""]]
+  HasDlqOperatorUser: !Not [!Equals [!Ref DlqOperatorUserName, ""]]
   HasAlertEmail: !Not [!Equals [!Ref AlertEmail, ""]]
   ShouldDeployBudget: !And
     - !Equals [!Ref DeployBudget, "true"]
@@ -280,11 +290,16 @@ Resources:
             ExpirationInDays: 90
             NoncurrentVersionExpiration:
               NoncurrentDays: 30
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
           - Id: ExpireRawNoncurrentVersionsAfter30Days
             Prefix: raw/
             Status: Enabled
+            ExpiredObjectDeleteMarker: true
             NoncurrentVersionExpiration:
               NoncurrentDays: 30
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
       NotificationConfiguration:
         QueueConfigurations:
           - Event: "s3:ObjectCreated:*"
@@ -304,13 +319,32 @@ Resources:
         - Key: Layer
           Value: bronze-data-lake
 
+  S3RawBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref S3RawBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Id: EnforceTlsHttpsOnlyOnDataLake
+        Statement:
+          - Sid: DenyInsecureHttpTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt S3RawBucket.Arn
+              - !Sub "${S3RawBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
   # ============================================================================
   # 3. SECURITY & GOVERNANCE LAYER (LEAST-PRIVILEGE IAM ROLES & SPLIT POLICIES)
   # ============================================================================
   RedshiftS3ReadOnlyRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub "${ProjectPrefix}-RedshiftS3ReadOnlyRole-${EnvironmentName}"
+      RoleName: !Sub "${ProjectPrefix}-RedshiftS3ReadOnlyRole-${EnvironmentName}-${AWS::Region}"
       Description: >-
         Least-privilege IAM role assumed by Amazon Redshift Serverless via STS to COPY
         CSV files strictly from the s3://<bucket>/raw/* prefix without hardcoded keys.
@@ -362,7 +396,7 @@ Resources:
   AirflowRuntimePolicy:
     Type: AWS::IAM::ManagedPolicy
     Properties:
-      ManagedPolicyName: !Sub "${ProjectPrefix}-AirflowRuntimePolicy-${EnvironmentName}"
+      ManagedPolicyName: !Sub "${ProjectPrefix}-AirflowRuntimePolicy-${EnvironmentName}-${AWS::Region}"
       Description: >-
         Least-privilege runtime policy for Apache Airflow 3 consumer and archiver:
         consume/ACK/extend visibility on SqsMainQueue only; GET/DELETE on s3 raw/*;
@@ -414,13 +448,13 @@ Resources:
   DlqOperatorPolicy:
     Type: AWS::IAM::ManagedPolicy
     Properties:
-      ManagedPolicyName: !Sub "${ProjectPrefix}-DlqOperatorPolicy-${EnvironmentName}"
+      ManagedPolicyName: !Sub "${ProjectPrefix}-DlqOperatorPolicy-${EnvironmentName}-${AWS::Region}"
       Description: >-
         Dedicated incident-recovery policy for inspecting poison messages in SqsDeadLetterQueue
         and executing SQS DLQ Redrive (StartMessageMoveTask) back to SqsMainQueue.
       Users: !If
-        - HasAirflowPrincipalUser
-        - - !Ref AirflowPrincipalUserName
+        - HasDlqOperatorUser
+        - - !Ref DlqOperatorUserName
         - !Ref "AWS::NoValue"
       PolicyDocument:
         Version: "2012-10-17"
@@ -646,6 +680,10 @@ Resources:
       DefaultIamRoleArn: !GetAtt RedshiftS3ReadOnlyRole.Arn
       IamRoles:
         - !GetAtt RedshiftS3ReadOnlyRole.Arn
+      LogExports:
+        - userlog
+        - connectionlog
+        - useractivitylog
 
   RedshiftServerlessWorkgroup:
     Type: AWS::RedshiftServerless::Workgroup

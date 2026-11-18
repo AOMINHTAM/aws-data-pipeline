@@ -14,8 +14,9 @@ models:
         tests:
           - not_null
           - relationships:
-              to: ref('dim_customers')
-              field: customer_id
+              arguments:
+                to: ref('dim_customers')
+                field: customer_id
       - name: total_order_cost
         description: "Tổng giá trị hàng hóa cộng phí vận chuyển của đơn hàng"
       - name: total_payment_value
@@ -27,7 +28,8 @@ models:
         tests:
           - not_null
           - accepted_values:
-              values: ['Pending Delivery', 'Delayed', 'On Time']
+              arguments:
+                values: ['Pending Delivery', 'Delayed', 'On Time']
 
   - name: dim_customers
     description: "Bảng Dimension lưu trữ thông tin khách hàng, phân khúc và tổng chi tiêu trọn đời (LTV)"
