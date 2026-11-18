@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 import os
 import sys
 
@@ -12,7 +12,12 @@ from cosmos import DbtTaskGroup, ProfileConfig, ProjectConfig
 
 # Đảm bảo import được module từ include/
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
-from include.ingestion_guards import ensure_non_empty_stage  # noqa: E402
+from include.ingestion_guards import (  # noqa: E402
+    build_audit_id,
+    build_deterministic_archive_key,
+    ensure_non_empty_stage,
+    verify_safe_to_ack_when_raw_missing,
+)
 from include.sqs_parser import (  # noqa: E402
     CSV_TO_RAW_TABLE,
     deduplicate_sqs_messages,
@@ -34,7 +39,7 @@ DBT_PROFILES_PATH = os.getenv(
     "DBT_PROFILES_PATH", os.path.join(DBT_PROJECT_PATH, "profiles.yml")
 )
 
-# Cấu hình AWS S3, SQS & Redshift Serverless (đọc từ .env)
+# Cấu hình AWS S3, SQS & Redshift Serverless (đọc từ .env / CloudFormation Outputs)
 AWS_REGION = os.getenv("AWS_DEFAULT_REGION", "us-east-1")
 S3_BUCKET = os.getenv(
     "S3_BUCKET_NAME",
@@ -45,7 +50,7 @@ SQS_QUEUE_URL = os.getenv(
     "SQS_QUEUE_URL",
     f"https://sqs.{AWS_REGION}.amazonaws.com/205506434601/{SQS_QUEUE_NAME}",
 )
-# 15 phút VisibilityTimeout: đủ dư cho Redshift staging COPY + dbt incremental + data quality tests
+# 15 phút VisibilityTimeout + cơ chế gia hạn (ChangeMessageVisibility heartbeat) qua từng chặng
 SQS_VISIBILITY_TIMEOUT = int(os.getenv("SQS_VISIBILITY_TIMEOUT", "900"))
 
 REDSHIFT_IAM_ROLE = os.getenv(
@@ -96,6 +101,124 @@ sqs_raw_arrival_asset = Asset(
 )
 
 
+def _open_redshift_conn():
+    """Khởi tạo kết nối Redshift Serverless với autocommit=False."""
+    import redshift_connector
+
+    redshift_password = os.getenv("DBT_REDSHIFT_PASSWORD")
+    if not redshift_password:
+        raise ValueError("Thiếu biến môi trường DBT_REDSHIFT_PASSWORD trong .env!")
+
+    conn = redshift_connector.connect(
+        host=REDSHIFT_HOST,
+        port=REDSHIFT_PORT,
+        database=REDSHIFT_DB,
+        user=REDSHIFT_USER,
+        password=redshift_password,
+        ssl=True,
+    )
+    conn.autocommit = False
+    return conn
+
+
+def _ensure_ops_audit_table(cursor, conn) -> None:
+    """Đảm bảo schema ops và bảng ops.pipeline_ingestion_audit tồn tại trên Redshift."""
+    cursor.execute("CREATE SCHEMA IF NOT EXISTS ops;")
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ops.pipeline_ingestion_audit (
+            audit_id        VARCHAR(256),
+            dag_run_id      VARCHAR(256),
+            s3_bucket       VARCHAR(256),
+            s3_key          VARCHAR(1024),
+            archive_key     VARCHAR(1024),
+            table_name      VARCHAR(128),
+            rows_loaded     BIGINT,
+            status          VARCHAR(32),
+            error_message   VARCHAR(2000),
+            recorded_at     TIMESTAMP DEFAULT SYSDATE
+        );
+        """
+    )
+    conn.commit()
+
+
+def _record_audit_event(
+    cursor,
+    conn,
+    *,
+    audit_id: str,
+    dag_run_id: str,
+    s3_key: str,
+    archive_key: str,
+    table_name: str,
+    rows_loaded: int,
+    status: str,
+    error_message: str = "",
+) -> None:
+    """Ghi trạng thái (SWAPPED / ARCHIVED / COMPLETED / FAILED) vào ops.pipeline_ingestion_audit."""
+    try:
+        cursor.execute(
+            """
+            INSERT INTO ops.pipeline_ingestion_audit (
+                audit_id, dag_run_id, s3_bucket, s3_key, archive_key,
+                table_name, rows_loaded, status, error_message
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s);
+            """,
+            (
+                audit_id[:256],
+                dag_run_id[:256],
+                S3_BUCKET[:256],
+                s3_key[:1024],
+                archive_key[:1024],
+                table_name[:128],
+                int(rows_loaded),
+                status[:32],
+                error_message[:1900],
+            ),
+        )
+        conn.commit()
+    except Exception as audit_err:
+        conn.rollback()
+        print(f"Cảnh báo khi ghi ops.pipeline_ingestion_audit ({status}): {audit_err}")
+
+
+def _fetch_latest_audit_status(cursor, audit_id: str) -> tuple[str | None, str | None]:
+    """Lấy (status, archive_key) mới nhất của audit_id từ ops.pipeline_ingestion_audit."""
+    cursor.execute(
+        """
+        SELECT status, archive_key
+        FROM ops.pipeline_ingestion_audit
+        WHERE audit_id = %s
+        ORDER BY recorded_at DESC
+        LIMIT 1;
+        """,
+        (audit_id,),
+    )
+    row = cursor.fetchone()
+    if not row:
+        return None, None
+    return row[0], row[1]
+
+
+def _refresh_sqs_visibility(
+    sqs_client, receipt_handles: list[str], timeout_sec: int, stage_label: str
+) -> None:
+    """
+    Gia hạn VisibilityTimeout (Heartbeat) cho các ReceiptHandle đang xử lý
+    để ngăn message hết hạn giữa chừng khi dbt chạy lâu.
+    """
+    for handle in receipt_handles:
+        try:
+            sqs_client.change_message_visibility(
+                QueueUrl=SQS_QUEUE_URL,
+                ReceiptHandle=handle,
+                VisibilityTimeout=int(timeout_sec),
+            )
+        except Exception as err:
+            print(f"Cảnh báo khi gia hạn VisibilityTimeout ({stage_label}): {err}")
+
+
 def _delete_sqs_handles(
     sqs_client, receipt_handles: list[str], context_label: str
 ) -> list[str]:
@@ -112,24 +235,23 @@ def _delete_sqs_handles(
 
 
 def _collect_sqs_messages(context: dict, sqs_client) -> list[dict]:
-    """Gom messages từ Triggering AssetEvent và hút cạn các messages đến cùng lô trong SQS."""
+    """
+    Ưu tiên tiêu thụ chính xác batch message từ Triggering AssetEvent (giữ nguyên ReceiptHandle).
+    Chỉ poll bổ sung tối đa 1 batch (10 messages) nếu chạy manual hoặc gom các file cùng đợt.
+    """
     asset_messages = extract_messages_from_asset_events(
         context.get("triggering_asset_events")
     )
 
     polled_messages: list[dict] = []
     try:
-        for _ in range(5):
-            resp = sqs_client.receive_message(
-                QueueUrl=SQS_QUEUE_URL,
-                MaxNumberOfMessages=10,
-                WaitTimeSeconds=1,
-                VisibilityTimeout=SQS_VISIBILITY_TIMEOUT,
-            )
-            extra = resp.get("Messages", [])
-            if not extra:
-                break
-            polled_messages.extend(extra)
+        resp = sqs_client.receive_message(
+            QueueUrl=SQS_QUEUE_URL,
+            MaxNumberOfMessages=10,
+            WaitTimeSeconds=1,
+            VisibilityTimeout=SQS_VISIBILITY_TIMEOUT,
+        )
+        polled_messages.extend(resp.get("Messages", []))
     except Exception as err:
         print(f"Cảnh báo khi kiểm tra thêm message từ SQS: {err}")
 
@@ -140,9 +262,9 @@ with DAG(
     dag_id="ecommerce_aws_data_pipeline",
     default_args=default_args,
     description=(
-        "True Event-Driven AWS ELT Pipeline V4 "
-        "(S3 -> SQS AssetWatcher -> Atomic Redshift Staging Swap -> "
-        "dbt Incremental -> Archive & ACK)"
+        "True Event-Driven AWS ELT Pipeline V5 "
+        "(S3 -> SQS/DLQ AssetWatcher -> Atomic Redshift Swap & Audit -> "
+        "dbt Incremental -> Verified Deterministic Archive & Safe ACK)"
     ),
     schedule=[sqs_raw_arrival_asset],
     start_date=datetime(2026, 1, 1),
@@ -155,20 +277,19 @@ with DAG(
         "redshift",
         "sqs-event-driven",
         "asset-watcher",
-        "v4",
+        "v5",
     ],
 ):
 
     start_pipeline = EmptyOperator(task_id="start_pipeline")
 
-    # 1. Tiêu thụ SQS messages từ AssetWatcher (hoặc manual trigger), kiểm tra S3 tồn tại
-    #    và nạp vào Redshift qua TEMP TABLE + Atomic Transaction (DELETE + INSERT)
+    # 1. Tiêu thụ SQS messages từ AssetWatcher, kiểm tra S3 tồn tại, nạp vào Redshift
+    #    qua TEMP TABLE + Atomic Swap (DELETE + INSERT) và ghi nhận ops.pipeline_ingestion_audit
     @task
     def load_raw_from_sqs(**context) -> list[dict]:
-        import redshift_connector
-
         sqs_hook = SqsHook(aws_conn_id="aws_default")
         sqs_client = sqs_hook.get_conn()
+        dag_run_id = str(context.get("run_id") or "manual_run")
 
         all_messages = _collect_sqs_messages(context, sqs_client)
         if not all_messages:
@@ -216,29 +337,19 @@ with DAG(
             f"{[f['filename'] for f in files_to_load]}"
         )
 
-        redshift_password = os.getenv("DBT_REDSHIFT_PASSWORD")
-        if not redshift_password:
-            raise ValueError("Thiếu biến môi trường DBT_REDSHIFT_PASSWORD trong .env!")
-
-        conn = redshift_connector.connect(
-            host=REDSHIFT_HOST,
-            port=REDSHIFT_PORT,
-            database=REDSHIFT_DB,
-            user=REDSHIFT_USER,
-            password=redshift_password,
-            ssl=True,
-        )
-        # Bắt buộc autocommit=False để DELETE + INSERT nằm trọn trong 1 transaction có thể ROLLBACK
-        conn.autocommit = False
+        conn = _open_redshift_conn()
         cursor = conn.cursor()
 
         loaded_items: list[dict] = []
         try:
+            _ensure_ops_audit_table(cursor, conn)
+
             for file_info in files_to_load:
                 s3_key = file_info["s3_key"]
                 table_name = file_info["table_name"]
                 s3_uri = f"s3://{S3_BUCKET}/{s3_key}"
                 tmp_table = f"tmp_stage_{table_name}"
+                audit_id = build_audit_id(dag_run_id, table_name)
 
                 try:
                     # Bước A: Nạp vào TEMP TABLE trước — nếu lỗi, bảng đích raw_data vẫn an toàn
@@ -272,12 +383,51 @@ with DAG(
 
                     cursor.execute(f"DROP TABLE IF EXISTS {tmp_table};")
                     conn.commit()
-                except Exception:
+
+                    # Bước C: Chỉ ghi rows_loaded = staged_rows SAU KHI bảng chính đã commit xong!
+                    _record_audit_event(
+                        cursor,
+                        conn,
+                        audit_id=audit_id,
+                        dag_run_id=dag_run_id,
+                        s3_key=s3_key,
+                        archive_key="",
+                        table_name=table_name,
+                        rows_loaded=staged_rows,
+                        status="SWAPPED",
+                    )
+                except Exception as err:
                     conn.rollback()
+                    _record_audit_event(
+                        cursor,
+                        conn,
+                        audit_id=audit_id,
+                        dag_run_id=dag_run_id,
+                        s3_key=s3_key,
+                        archive_key="",
+                        table_name=table_name,
+                        rows_loaded=0,
+                        status="FAILED",
+                        error_message=str(err),
+                    )
                     raise
 
+                # Bước D: Gia hạn VisibilityTimeout (Heartbeat) trước khi sang chặng dbt
+                _refresh_sqs_visibility(
+                    sqs_client,
+                    file_info.get("receipt_handles", []),
+                    SQS_VISIBILITY_TIMEOUT,
+                    f"post-swap-{file_info['filename']}",
+                )
                 print(f"Nạp atomic thành công raw_data.{table_name} ({staged_rows} dòng)!")
-                loaded_items.append({**file_info, "rows_loaded": staged_rows})
+                loaded_items.append(
+                    {
+                        **file_info,
+                        "rows_loaded": staged_rows,
+                        "audit_id": audit_id,
+                        "dag_run_id": dag_run_id,
+                    }
+                )
         finally:
             cursor.close()
             conn.close()
@@ -291,7 +441,7 @@ with DAG(
         profile_config=profile_config,
     )
 
-    # 3. Chỉ archive S3 -> xóa khỏi raw/ -> ACK (delete) SQS KHI VÀ CHỈ KHI dbt & tests PASS
+    # 3. Xác minh S3 Deterministic Archive + Audit hoàn tất trước khi ACK SQS
     @task
     def archive_and_ack_sqs_messages(loaded_items: list[dict]) -> None:
         if not loaded_items:
@@ -301,40 +451,116 @@ with DAG(
         s3_hook = S3Hook(aws_conn_id="aws_default")
         sqs_hook = SqsHook(aws_conn_id="aws_default")
         sqs_client = sqs_hook.get_conn()
-        run_stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+
+        conn = _open_redshift_conn()
+        cursor = conn.cursor()
 
         archived_count = 0
         failed_acks: list[str] = []
-        for item in loaded_items:
-            src_key = item["s3_key"]
-            filename = item["filename"]
-            dest_key = f"archive/{run_stamp}/{filename}"
+        try:
+            _ensure_ops_audit_table(cursor, conn)
 
-            if s3_hook.check_for_key(src_key, bucket_name=S3_BUCKET):
-                # 1. Copy S3: raw/ -> archive/<run_stamp>/
-                s3_hook.copy_object(
-                    source_bucket_key=src_key,
-                    dest_bucket_key=dest_key,
-                    source_bucket_name=S3_BUCKET,
-                    dest_bucket_name=S3_BUCKET,
+            for item in loaded_items:
+                src_key = item["s3_key"]
+                filename = item["filename"]
+                table_name = item["table_name"]
+                rows_loaded = int(item.get("rows_loaded", 0))
+                dag_run_id = str(item.get("dag_run_id") or "manual_run")
+                audit_id = str(
+                    item.get("audit_id") or build_audit_id(dag_run_id, table_name)
                 )
-                print(f"📦 S3 Archive: {src_key} -> {dest_key}")
+                dest_key = build_deterministic_archive_key(audit_id, filename)
+                handles = item.get("receipt_handles", [])
 
-                # 2. Dọn file khỏi raw/ trước khi ACK SQS để tránh file mồ côi nếu delete lỗi
-                s3_hook.delete_objects(bucket=S3_BUCKET, keys=[src_key])
-                print(f"🧹 S3 Cleanup: Đã xóa {src_key} khỏi raw/.")
-                archived_count += 1
-            else:
-                print(f"ℹ️ File {src_key} đã được archive trước đó, tiếp tục ACK SQS.")
+                # Gia hạn VisibilityTimeout trước khi copy S3 & ACK
+                _refresh_sqs_visibility(
+                    sqs_client, handles, SQS_VISIBILITY_TIMEOUT, f"pre-archive-{filename}"
+                )
 
-            # 3. Xóa message tương ứng khỏi SQS (At-Least-Once Delivery -> Idempotent Consumer)
-            failed_handles = _delete_sqs_handles(
-                sqs_client,
-                item.get("receipt_handles", []),
-                filename,
-            )
-            if failed_handles:
-                failed_acks.append(f"{filename} ({len(failed_handles)} handles)")
+                if s3_hook.check_for_key(src_key, bucket_name=S3_BUCKET):
+                    # 1. Copy S3: raw/ -> archive/<safe_audit_id>/<filename> (deterministic)
+                    s3_hook.copy_object(
+                        source_bucket_key=src_key,
+                        dest_bucket_key=dest_key,
+                        source_bucket_name=S3_BUCKET,
+                        dest_bucket_name=S3_BUCKET,
+                    )
+                    if not s3_hook.check_for_key(dest_key, bucket_name=S3_BUCKET):
+                        raise RuntimeError(
+                            f"S3 Archive verification failed: '{dest_key}' not found after copy."
+                        )
+                    print(f"📦 S3 Archive verified: {src_key} -> {dest_key}")
+
+                    # 2. Ghi nhận ARCHIVED kèm đúng dest_key TRƯỚC KHI xóa raw/
+                    _record_audit_event(
+                        cursor,
+                        conn,
+                        audit_id=audit_id,
+                        dag_run_id=dag_run_id,
+                        s3_key=src_key,
+                        archive_key=dest_key,
+                        table_name=table_name,
+                        rows_loaded=rows_loaded,
+                        status="ARCHIVED",
+                    )
+
+                    # 3. Dọn file khỏi raw/ và ghi nhận COMPLETED vào ops.pipeline_ingestion_audit
+                    s3_hook.delete_objects(bucket=S3_BUCKET, keys=[src_key])
+                    print(f"🧹 S3 Cleanup: Đã xóa {src_key} khỏi raw/.")
+                    _record_audit_event(
+                        cursor,
+                        conn,
+                        audit_id=audit_id,
+                        dag_run_id=dag_run_id,
+                        s3_key=src_key,
+                        archive_key=dest_key,
+                        table_name=table_name,
+                        rows_loaded=rows_loaded,
+                        status="COMPLETED",
+                    )
+                    archived_count += 1
+                else:
+                    # Nhánh Retry: raw/ không còn file -> đối chiếu đúng dest_key của lượt này
+                    audit_status, recorded_archive_key = _fetch_latest_audit_status(
+                        cursor, audit_id
+                    )
+                    archive_exists = bool(
+                        recorded_archive_key
+                        and s3_hook.check_for_key(
+                            recorded_archive_key, bucket_name=S3_BUCKET
+                        )
+                    )
+                    verify_safe_to_ack_when_raw_missing(
+                        audit_status=audit_status,
+                        archive_exists=archive_exists,
+                        s3_key=src_key,
+                        archive_key=recorded_archive_key,
+                        expected_archive_key=dest_key,
+                    )
+                    print(
+                        f"ℹ️ Xác minh an toàn cho '{src_key}' (audit={audit_status}, "
+                        f"archive='{recorded_archive_key}'), tiếp tục ACK SQS."
+                    )
+                    if audit_status != "COMPLETED":
+                        _record_audit_event(
+                            cursor,
+                            conn,
+                            audit_id=audit_id,
+                            dag_run_id=dag_run_id,
+                            s3_key=src_key,
+                            archive_key=dest_key,
+                            table_name=table_name,
+                            rows_loaded=rows_loaded,
+                            status="COMPLETED",
+                        )
+
+                # 4. Xóa message tương ứng khỏi SQS (At-Least-Once Delivery -> Safe ACK)
+                failed_handles = _delete_sqs_handles(sqs_client, handles, filename)
+                if failed_handles:
+                    failed_acks.append(f"{filename} ({len(failed_handles)} handles)")
+        finally:
+            cursor.close()
+            conn.close()
 
         if failed_acks:
             raise RuntimeError(
@@ -343,8 +569,8 @@ with DAG(
             )
 
         print(
-            f"🎉 Hoàn tất chu trình Pure Event-Driven: {archived_count} file "
-            "đã được nạp atomic vào Redshift, chạy dbt Incremental, archive S3 và ACK SQS."
+            f"🎉 Hoàn tất chu trình Pure Event-Driven V5: {archived_count} file "
+            "đã được nạp atomic vào Redshift, chạy dbt Incremental, verify archive và ACK SQS."
         )
 
     end_pipeline = EmptyOperator(task_id="end_pipeline")

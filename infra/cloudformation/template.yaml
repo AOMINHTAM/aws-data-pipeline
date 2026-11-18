@@ -1,0 +1,729 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  AWS E-Commerce Event-Driven Data Pipeline V5 (FCJ Standard) -
+  Declarative CloudFormation stack provisioning Amazon S3 (with Versioning, Lifecycle, and
+  ObjectCreated notifications), Amazon SQS Main Queue + Dead-Letter Queue (DLQ RedrivePolicy
+  maxReceiveCount=3 and RedriveAllowPolicy), Least-Privilege IAM Role for Redshift COPY (raw/*),
+  split Least-Privilege IAM ManagedPolicies for Airflow Runtime & DLQ Operator (attached to
+  principal), 4 CloudWatch Alarms + Amazon SNS Topic & TopicPolicy, optional AWS Monthly Budget
+  ($5 Guardrail), and optional Amazon Redshift Serverless (with VPC SecurityGroup & Subnets).
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "1. Core Naming, Environment & Runtime Principal"
+        Parameters:
+          - ProjectPrefix
+          - EnvironmentName
+          - AirflowPrincipalUserName
+      - Label:
+          default: "2. Observability & FinOps Guardrails (CloudWatch, SNS & AWS Budgets)"
+        Parameters:
+          - AlertEmail
+          - DeployBudget
+          - MonthlyBudgetLimitUsd
+      - Label:
+          default: "3. Optional Amazon Redshift Serverless Provisioning (FinOps Safe Toggle)"
+        Parameters:
+          - DeployRedshift
+          - RedshiftBaseCapacityRpu
+          - RedshiftDatabaseName
+          - RedshiftAdminUsername
+          - RedshiftAdminPassword
+          - RedshiftPubliclyAccessible
+          - VpcId
+          - RedshiftSubnetIds
+          - AuthorizedCidrIp
+
+Parameters:
+  ProjectPrefix:
+    Type: String
+    Default: olist-v5
+    AllowedPattern: "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$"
+    MinLength: 3
+    MaxLength: 16
+    Description: >-
+      Resource prefix (3-16 chars, no leading/trailing hyphen; keeps S3 bucket name <= 55 chars,
+      well within AWS 63-char limit). Use 'olist-v5' to deploy side-by-side without colliding
+      with existing manual V4 resources.
+
+  EnvironmentName:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: Deployment environment stage.
+
+  AirflowPrincipalUserName:
+    Type: String
+    Default: de-ecommerce-dev
+    Description: >-
+      (Optional) Existing IAM User name running local/containerized Airflow (e.g. 'de-ecommerce-dev')
+      to automatically attach AirflowRuntimePolicy and DlqOperatorPolicy. Leave blank to create
+      standalone ManagedPolicies without user attachment.
+
+  AlertEmail:
+    Type: String
+    Default: ""
+    Description: >-
+      (Optional but recommended) Email address to receive Amazon SNS notifications when
+      CloudWatch Alarms fire (DLQ poison messages, queue age, in-flight activity, or backlog)
+      and AWS Budget alerts. Leave blank to create the SNS Topic without an email subscription.
+
+  DeployBudget:
+    Type: String
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
+    Description: >-
+      Set to 'true' (along with AlertEmail) to provision a $5/month AWS Cost Budget via IaC.
+      Defaults to 'false' if you already have a manual budget on the account.
+
+  MonthlyBudgetLimitUsd:
+    Type: Number
+    Default: 5
+    MinValue: 1
+    MaxValue: 1000
+    Description: Monthly AWS cost guardrail threshold in USD.
+
+  DeployRedshift:
+    Type: String
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
+    Description: >-
+      FinOps Safety Toggle: Keep 'false' (default) to deploy and test S3 + SQS + DLQ +
+      CloudWatch Alarms + SNS + IAM Roles/Policies 100% within AWS Always Free allowances
+      ($0.00) while reusing your existing Redshift Serverless workgroup. Set to 'true' to
+      provision a brand-new Redshift Serverless Namespace & Workgroup from scratch.
+
+  RedshiftBaseCapacityRpu:
+    Type: Number
+    Default: 4
+    AllowedValues:
+      - 4
+      - 8
+      - 16
+      - 32
+    Description: Base RPU capacity for Redshift Serverless Workgroup (4 RPUs minimum for FinOps).
+
+  RedshiftDatabaseName:
+    Type: String
+    Default: dev
+    AllowedPattern: "^[a-z0-9_]+$"
+    Description: Initial database name inside Redshift Serverless.
+
+  RedshiftAdminUsername:
+    Type: String
+    Default: admin
+    AllowedPattern: "^[a-zA-Z][a-zA-Z0-9_]*$"
+    Description: Admin username for Redshift Serverless Namespace.
+
+  RedshiftAdminPassword:
+    Type: String
+    Default: ""
+    NoEcho: true
+    Description: >-
+      Admin password for Redshift Serverless (required only when DeployRedshift='true';
+      must be 8-64 chars with uppercase, lowercase, and number). Masked via NoEcho.
+
+  RedshiftPubliclyAccessible:
+    Type: String
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
+    Description: >-
+      Whether the conditional Redshift Serverless Workgroup is publicly accessible. Defaults to
+      'false' (private VPC access); set to 'true' with a strict /32 AuthorizedCidrIp only for
+      authorized developer workstation access.
+
+  VpcId:
+    Type: String
+    Default: ""
+    Description: >-
+      (Optional) VPC ID for Redshift Security Group when DeployRedshift='true'.
+
+  RedshiftSubnetIds:
+    Type: String
+    Default: ""
+    Description: >-
+      (Optional) Comma-separated VPC Subnet IDs (in the same VPC as VpcId) for
+      RedshiftServerlessWorkgroup when DeployRedshift='true'.
+
+  AuthorizedCidrIp:
+    Type: String
+    Default: "127.0.0.1/32"
+    AllowedPattern: "^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$"
+    Description: >-
+      Authorized CIDR block (e.g. your public IP '<ip>/32') for inbound Redshift port 5439.
+      Defaults to loopback '127.0.0.1/32' (closed by default, never 0.0.0.0/0).
+
+Conditions:
+  HasAirflowPrincipalUser: !Not [!Equals [!Ref AirflowPrincipalUserName, ""]]
+  HasAlertEmail: !Not [!Equals [!Ref AlertEmail, ""]]
+  ShouldDeployBudget: !And
+    - !Equals [!Ref DeployBudget, "true"]
+    - !Condition HasAlertEmail
+  ShouldDeployRedshift: !Equals [!Ref DeployRedshift, "true"]
+  ShouldDeployRedshiftSg: !And
+    - !Condition ShouldDeployRedshift
+    - !Not [!Equals [!Ref VpcId, ""]]
+  HasRedshiftSubnets: !And
+    - !Condition ShouldDeployRedshift
+    - !Not [!Equals [!Ref RedshiftSubnetIds, ""]]
+  IsRedshiftPublic: !Equals [!Ref RedshiftPubliclyAccessible, "true"]
+
+Resources:
+  # ============================================================================
+  # 1. MESSAGING & FAULT TOLERANCE LAYER (SQS MAIN QUEUE + DEAD-LETTER QUEUE)
+  # ============================================================================
+  SqsDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${ProjectPrefix}-s3-raw-arrival-dlq-${EnvironmentName}"
+      # Keep poison messages for the maximum 14 days so engineers can inspect & redrive
+      MessageRetentionPeriod: 1209600
+      VisibilityTimeout: 300
+      SqsManagedSseEnabled: true
+      # Restrict DLQ usage strictly to the project's Main Queue (using !Sub to avoid circular dependency)
+      RedriveAllowPolicy:
+        redrivePermission: byQueue
+        sourceQueueArns:
+          - !Sub "arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:${ProjectPrefix}-s3-raw-arrival-queue-${EnvironmentName}"
+      Tags:
+        - Key: Project
+          Value: aws-data-pipeline
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Layer
+          Value: fault-tolerance-dlq
+
+  SqsMainQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${ProjectPrefix}-s3-raw-arrival-queue-${EnvironmentName}"
+      # 900s (15 min) matches Airflow DAG SQS_VISIBILITY_TIMEOUT + visibility heartbeat refresh
+      VisibilityTimeout: 900
+      # 20s AWS Long Polling matches Airflow 3 AssetWatcher (SqsSensorTrigger)
+      ReceiveMessageWaitTimeSeconds: 20
+      MessageRetentionPeriod: 345600
+      SqsManagedSseEnabled: true
+      # After 3 failed deliveries (e.g. corrupt or 0-row CSV), isolate message in DLQ
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt SqsDeadLetterQueue.Arn
+        maxReceiveCount: 3
+      Tags:
+        - Key: Project
+          Value: aws-data-pipeline
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Layer
+          Value: event-ingestion-queue
+
+  # NOTE ON CIRCULAR DEPENDENCY AVOIDANCE:
+  # S3 BucketNotification requires SqsMainQueuePolicy to exist BEFORE S3RawBucket is created.
+  # Therefore, SqsMainQueuePolicy constructs the S3 bucket ARN via !Sub instead of !GetAtt S3RawBucket.Arn.
+  SqsMainQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref SqsMainQueue
+      PolicyDocument:
+        Version: "2012-10-17"
+        Id: AllowS3RawArrivalEventNotification
+        Statement:
+          - Sid: AllowS3SendMessageFromProjectBucketOnly
+            Effect: Allow
+            Principal:
+              Service: s3.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt SqsMainQueue.Arn
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref "AWS::AccountId"
+              ArnLike:
+                aws:SourceArn: !Sub "arn:${AWS::Partition}:s3:::${ProjectPrefix}-raw-data-${EnvironmentName}-${AWS::AccountId}-${AWS::Region}"
+
+  # ============================================================================
+  # 2. DATA LAKE STORAGE & PUSH EVENT NOTIFICATION LAYER (AMAZON S3)
+  # ============================================================================
+  S3RawBucket:
+    Type: AWS::S3::Bucket
+    DependsOn:
+      - SqsMainQueuePolicy
+    Properties:
+      BucketName: !Sub "${ProjectPrefix}-raw-data-${EnvironmentName}-${AWS::AccountId}-${AWS::Region}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireArchivedCsvsAfter90Days
+            Prefix: archive/
+            Status: Enabled
+            ExpirationInDays: 90
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 30
+          - Id: ExpireRawNoncurrentVersionsAfter30Days
+            Prefix: raw/
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 30
+      NotificationConfiguration:
+        QueueConfigurations:
+          - Event: "s3:ObjectCreated:*"
+            Queue: !GetAtt SqsMainQueue.Arn
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: raw/
+                  - Name: suffix
+                    Value: .csv
+      Tags:
+        - Key: Project
+          Value: aws-data-pipeline
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Layer
+          Value: bronze-data-lake
+
+  # ============================================================================
+  # 3. SECURITY & GOVERNANCE LAYER (LEAST-PRIVILEGE IAM ROLES & SPLIT POLICIES)
+  # ============================================================================
+  RedshiftS3ReadOnlyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectPrefix}-RedshiftS3ReadOnlyRole-${EnvironmentName}"
+      Description: >-
+        Least-privilege IAM role assumed by Amazon Redshift Serverless via STS to COPY
+        CSV files strictly from the s3://<bucket>/raw/* prefix without hardcoded keys.
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowRedshiftAndServerlessAssumeRoleInAccount
+            Effect: Allow
+            Principal:
+              Service:
+                - redshift.amazonaws.com
+                - redshift-serverless.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref "AWS::AccountId"
+      Policies:
+        - PolicyName: !Sub "${ProjectPrefix}-S3RawPrefixReadOnlyPolicy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: AllowGetBucketLocation
+                Effect: Allow
+                Action:
+                  - s3:GetBucketLocation
+                Resource: !GetAtt S3RawBucket.Arn
+              - Sid: AllowListRawPrefixOnly
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: !GetAtt S3RawBucket.Arn
+                Condition:
+                  StringLike:
+                    s3:prefix:
+                      - "raw/*"
+                      - "raw"
+              - Sid: AllowGetRawCsvObjectsOnly
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                Resource: !Sub "${S3RawBucket.Arn}/raw/*"
+      Tags:
+        - Key: Project
+          Value: aws-data-pipeline
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  AirflowRuntimePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "${ProjectPrefix}-AirflowRuntimePolicy-${EnvironmentName}"
+      Description: >-
+        Least-privilege runtime policy for Apache Airflow 3 consumer and archiver:
+        consume/ACK/extend visibility on SqsMainQueue only; GET/DELETE on s3 raw/*;
+        GET/PUT (no DELETE) on s3 archive/*.
+      Users: !If
+        - HasAirflowPrincipalUser
+        - - !Ref AirflowPrincipalUserName
+        - !Ref "AWS::NoValue"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowAirflowConsumeMainQueueOnly
+            Effect: Allow
+            Action:
+              - sqs:ReceiveMessage
+              - sqs:DeleteMessage
+              - sqs:ChangeMessageVisibility
+              - sqs:GetQueueAttributes
+              - sqs:GetQueueUrl
+            Resource: !GetAtt SqsMainQueue.Arn
+          - Sid: AllowAirflowListRawAndArchivePrefixes
+            Effect: Allow
+            Action:
+              - s3:GetBucketLocation
+              - s3:ListBucket
+            Resource: !GetAtt S3RawBucket.Arn
+            Condition:
+              StringLike:
+                s3:prefix:
+                  - "raw"
+                  - "raw/*"
+                  - "archive"
+                  - "archive/*"
+          - Sid: AllowAirflowReadAndDeleteRawLandingObjects
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:GetObjectVersion
+              - s3:DeleteObject
+            Resource: !Sub "${S3RawBucket.Arn}/raw/*"
+          - Sid: AllowAirflowReadAndWriteArchiveObjectsWithoutDelete
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:GetObjectVersion
+              - s3:PutObject
+            Resource: !Sub "${S3RawBucket.Arn}/archive/*"
+
+  DlqOperatorPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "${ProjectPrefix}-DlqOperatorPolicy-${EnvironmentName}"
+      Description: >-
+        Dedicated incident-recovery policy for inspecting poison messages in SqsDeadLetterQueue
+        and executing SQS DLQ Redrive (StartMessageMoveTask) back to SqsMainQueue.
+      Users: !If
+        - HasAirflowPrincipalUser
+        - - !Ref AirflowPrincipalUserName
+        - !Ref "AWS::NoValue"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowInspectAndRedriveFromDlq
+            Effect: Allow
+            Action:
+              - sqs:StartMessageMoveTask
+              - sqs:CancelMessageMoveTask
+              - sqs:ListMessageMoveTasks
+              - sqs:ReceiveMessage
+              - sqs:DeleteMessage
+              - sqs:GetQueueAttributes
+              - sqs:GetQueueUrl
+              - sqs:ListDeadLetterSourceQueues
+            Resource: !GetAtt SqsDeadLetterQueue.Arn
+          - Sid: AllowRedriveDestinationSendToMainQueue
+            Effect: Allow
+            Action:
+              - sqs:SendMessage
+              - sqs:GetQueueAttributes
+            Resource: !GetAtt SqsMainQueue.Arn
+
+  # ============================================================================
+  # 4. OBSERVABILITY & PROACTIVE ALERTING LAYER (4 CLOUDWATCH ALARMS + SNS)
+  # ============================================================================
+  PipelineAlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${ProjectPrefix}-pipeline-alerts-${EnvironmentName}"
+      DisplayName: "AWS Data Pipeline V5 Alerting"
+      Tags:
+        - Key: Project
+          Value: aws-data-pipeline
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  PipelineAlertTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !Ref PipelineAlertTopic
+      PolicyDocument:
+        Version: "2012-10-17"
+        Id: AllowCloudWatchAlarmsPublishToSns
+        Statement:
+          - Sid: AllowCloudWatchAlarmPublishInAccount
+            Effect: Allow
+            Principal:
+              Service: cloudwatch.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref PipelineAlertTopic
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref "AWS::AccountId"
+              ArnLike:
+                aws:SourceArn: !Sub "arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${ProjectPrefix}-*-${EnvironmentName}"
+
+  PipelineAlertEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasAlertEmail
+    Properties:
+      TopicArn: !Ref PipelineAlertTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+
+  DlqMessagesVisibleAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ProjectPrefix}-dlq-messages-visible-${EnvironmentName}"
+      AlarmDescription: >-
+        CRITICAL: One or more poison CSV messages failed ingestion 3 times and landed in
+        the SQS Dead-Letter Queue (e.g. empty-stage guard triggered or malformed CSV).
+        Inspect ops.pipeline_ingestion_audit and DLQ, fix the file on S3, and run DLQ Redrive.
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt SqsDeadLetterQueue.QueueName
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref PipelineAlertTopic
+      OKActions:
+        - !Ref PipelineAlertTopic
+
+  MainQueueOldestMessageAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ProjectPrefix}-main-queue-backlog-age-${EnvironmentName}"
+      AlarmDescription: >-
+        WARNING (SLA Breach): A message in the main SQS queue is older than 600 seconds
+        (10 minutes), approaching the 900s VisibilityTimeout. Verify that the Airflow 3
+        Triggerer (AssetWatcher) is running or check for slow dbt/Redshift execution.
+      Namespace: AWS/SQS
+      MetricName: ApproximateAgeOfOldestMessage
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt SqsMainQueue.QueueName
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 600
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref PipelineAlertTopic
+      OKActions:
+        - !Ref PipelineAlertTopic
+
+  MainQueueInFlightAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ProjectPrefix}-main-queue-inflight-sustained-${EnvironmentName}"
+      AlarmDescription: >-
+        WARNING (Sustained Queue-Level In-Flight Activity): ApproximateNumberOfMessagesNotVisible
+        has remained >= 1 across 15 consecutive 1-minute periods. Indicates either continuous
+        overlapping batch execution or a long-running/stalled consumer holding in-flight messages.
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesNotVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt SqsMainQueue.QueueName
+      Statistic: Minimum
+      Period: 60
+      EvaluationPeriods: 15
+      DatapointsToAlarm: 15
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref PipelineAlertTopic
+      OKActions:
+        - !Ref PipelineAlertTopic
+
+  MainQueueBacklogAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ProjectPrefix}-main-queue-backlog-volume-${EnvironmentName}"
+      AlarmDescription: >-
+        WARNING (Queue Backlog Spike): 20 or more messages have accumulated in the main
+        SQS queue over 3 consecutive minutes. Check consumer throughput or S3 event burst.
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt SqsMainQueue.QueueName
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 3
+      Threshold: 20
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref PipelineAlertTopic
+      OKActions:
+        - !Ref PipelineAlertTopic
+
+  # ============================================================================
+  # 5. FINOPS GUARDRAIL LAYER (OPTIONAL AWS BUDGET ALERT AT $5/MONTH)
+  # ============================================================================
+  MonthlyCostBudget:
+    Type: AWS::Budgets::Budget
+    Condition: ShouldDeployBudget
+    Properties:
+      Budget:
+        BudgetName: !Sub "${ProjectPrefix}-monthly-finops-budget-${EnvironmentName}"
+        BudgetType: COST
+        TimeUnit: MONTHLY
+        BudgetLimit:
+          Amount: !Ref MonthlyBudgetLimitUsd
+          Unit: USD
+      NotificationsWithSubscribers:
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 80
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref AlertEmail
+        - Notification:
+            NotificationType: FORECASTED
+            ComparisonOperator: GREATER_THAN
+            Threshold: 100
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref AlertEmail
+
+  # ============================================================================
+  # 6. DATA WAREHOUSE LAYER (OPTIONAL REDSHIFT SERVERLESS - DEPLOY ON DEMAND)
+  # ============================================================================
+  RedshiftSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: ShouldDeployRedshiftSg
+    Properties:
+      GroupDescription: "Allow inbound Redshift port 5439 strictly from AuthorizedCidrIp"
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5439
+          ToPort: 5439
+          CidrIp: !Ref AuthorizedCidrIp
+          Description: "Authorized developer CIDR for Airflow / dbt / export script"
+
+  RedshiftServerlessNamespace:
+    Type: AWS::RedshiftServerless::Namespace
+    Condition: ShouldDeployRedshift
+    Properties:
+      NamespaceName: !Sub "${ProjectPrefix}-namespace-${EnvironmentName}"
+      DbName: !Ref RedshiftDatabaseName
+      AdminUsername: !Ref RedshiftAdminUsername
+      AdminUserPassword: !Ref RedshiftAdminPassword
+      DefaultIamRoleArn: !GetAtt RedshiftS3ReadOnlyRole.Arn
+      IamRoles:
+        - !GetAtt RedshiftS3ReadOnlyRole.Arn
+
+  RedshiftServerlessWorkgroup:
+    Type: AWS::RedshiftServerless::Workgroup
+    Condition: ShouldDeployRedshift
+    DependsOn:
+      - RedshiftServerlessNamespace
+    Properties:
+      WorkgroupName: !Sub "${ProjectPrefix}-workgroup-${EnvironmentName}"
+      NamespaceName: !Ref RedshiftServerlessNamespace
+      BaseCapacity: !Ref RedshiftBaseCapacityRpu
+      PubliclyAccessible: !If [IsRedshiftPublic, true, false]
+      SecurityGroupIds: !If
+        - ShouldDeployRedshiftSg
+        - - !Ref RedshiftSecurityGroup
+        - !Ref "AWS::NoValue"
+      SubnetIds: !If
+        - HasRedshiftSubnets
+        - !Split [",", !Ref RedshiftSubnetIds]
+        - !Ref "AWS::NoValue"
+
+Outputs:
+  S3RawBucketName:
+    Description: "S3 Data Lake bucket name (set as S3_BUCKET_NAME in .env)"
+    Value: !Ref S3RawBucket
+
+  S3RawBucketArn:
+    Description: "S3 Data Lake bucket ARN"
+    Value: !GetAtt S3RawBucket.Arn
+
+  SqsMainQueueName:
+    Description: "SQS Main Queue name (set as SQS_QUEUE_NAME in .env)"
+    Value: !GetAtt SqsMainQueue.QueueName
+
+  SqsMainQueueUrl:
+    Description: "SQS Main Queue URL (set as SQS_QUEUE_URL in .env)"
+    Value: !Ref SqsMainQueue
+
+  SqsMainQueueArn:
+    Description: "SQS Main Queue ARN"
+    Value: !GetAtt SqsMainQueue.Arn
+
+  SqsDeadLetterQueueName:
+    Description: "SQS Dead-Letter Queue (DLQ) name for poison message isolation"
+    Value: !GetAtt SqsDeadLetterQueue.QueueName
+
+  SqsDeadLetterQueueUrl:
+    Description: "SQS Dead-Letter Queue (DLQ) URL"
+    Value: !Ref SqsDeadLetterQueue
+
+  SqsDeadLetterQueueArn:
+    Description: "SQS Dead-Letter Queue (DLQ) ARN"
+    Value: !GetAtt SqsDeadLetterQueue.Arn
+
+  RedshiftS3ReadOnlyRoleArn:
+    Description: "Least-privilege IAM Role ARN for Redshift COPY (set as REDSHIFT_IAM_ROLE in .env)"
+    Value: !GetAtt RedshiftS3ReadOnlyRole.Arn
+
+  AirflowRuntimePolicyArn:
+    Description: "Least-privilege IAM ManagedPolicy ARN for Airflow runtime (SqsMainQueue + S3 raw/archive)"
+    Value: !Ref AirflowRuntimePolicy
+
+  DlqOperatorPolicyArn:
+    Description: "Least-privilege IAM ManagedPolicy ARN for SQS DLQ inspection and Redrive"
+    Value: !Ref DlqOperatorPolicy
+
+  PipelineAlertTopicArn:
+    Description: "Amazon SNS Topic ARN for CloudWatch Alarm notifications"
+    Value: !Ref PipelineAlertTopic
+
+  DlqAlarmName:
+    Description: "CloudWatch Alarm monitoring SQS DLQ visible messages (>= 1)"
+    Value: !Ref DlqMessagesVisibleAlarm
+
+  MainQueueBacklogAgeAlarmName:
+    Description: "CloudWatch Alarm monitoring main SQS queue oldest message age (> 600s SLA)"
+    Value: !Ref MainQueueOldestMessageAlarm
+
+  MainQueueInFlightAlarmName:
+    Description: "CloudWatch Alarm monitoring sustained queue-level in-flight activity (>= 1 for 15m)"
+    Value: !Ref MainQueueInFlightAlarm
+
+  MainQueueBacklogVolumeAlarmName:
+    Description: "CloudWatch Alarm monitoring queue backlog spike (>= 20 visible messages)"
+    Value: !Ref MainQueueBacklogAlarm

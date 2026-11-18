@@ -143,11 +143,82 @@ flowchart LR
 
 ---
 
-### STEP 3: Lightweight Observability & Webhook Alerting — `🗓️ OPTIONAL / BACKLOG`
+### STEP 3 (UPGRADING TO V5): Production CloudOps, AWS CloudFormation IaC, SQS DLQ & CloudWatch/SNS Alerting (FCJ Standard) — `✅ LIVE VERIFIED ON feat/v5-cloudformation-resilience`
 
-#### 1. What to Build
-* Implement a Python callback (`send_pipeline_notification(context)`) attached to Airflow DAG `on_success_callback` / `on_failure_callback`.
-* Dispatch formatted Markdown alerts to **Telegram Bot API** or **Slack/Discord Incoming Webhooks** using standard HTTP POST requests.
+Following the **`v4.0.1`** release that locked in the **Data Engineering Core** (S3 → SQS → Airflow 3 `AssetWatcher` → Per-Table Atomic Redshift Swap → dbt Multi-Source Incremental Marts + 100% Green GitHub Actions CI), the project is evolving into **V5 (`v5.0.0`)** to meet full **AWS First Cloud Journey (FCJ)** production engineering standards for reproducibility, poison-message fault tolerance, active alerting, and disaster recovery.
 
-#### 2. Under-the-Hood Mechanism
-* Leverages Airflow's **Execution Context (`context`)** dictionary and `xcom_pull` to extract batch metrics (loaded files, execution duration, exception traces, and log links) for rich, actionable incident alerting.
+#### 1. Architectural Evolution Matrix (V2 → V3 → V4 → V5)
+
+| Generation | Architectural Focus | Infrastructure & Provisioning | Fault Tolerance & Observability |
+| :--- | :--- | :--- | :--- |
+| **V2 (Baseline)** | Manual batch ELT pipeline | Manual AWS Console / CLI setup | Manual UI inspection |
+| **V3 (Polling)** | Scheduled `S3KeySensor` polling (every 15m) | Manual AWS Console / CLI setup | `soft_fail=True` empty-run skip |
+| **V4 (`v4.0.1`)** | **Pure Push Event-Driven & Incremental Core** (`S3 Event` → `SQS` → Airflow 3 `AssetWatcher` + `TEMP TABLE` Atomic Swap + Empty-Stage Guard + 4-source `fct_orders` Incremental) | Code, SQL & 3-job GitHub Actions CI (`ci.yml`) in Git; AWS infra created via CLI | Per-table transaction rollback + S3 duplicate guard + SQS ACK retry safety |
+| **V5 (`v5.0.0`)** | **Production CloudOps & Resilience (FCJ Standard)** | **100% AWS CloudFormation IaC (`infra/cloudformation/template.yaml`, 14 core resources)** with Native Auto-Rollback, Change Sets, `cfn-lint` CI, S3 Versioning + `scripts/empty_versioned_bucket.py`, split `AirflowRuntimePolicy` & `DlqOperatorPolicy` | **SQS DLQ (`maxReceiveCount=3`, `RedriveAllowPolicy`) + DLQ Redrive** + **4 CloudWatch Alarms + `PipelineAlertTopicPolicy` + SNS Email** + **`ops.pipeline_ingestion_audit` & Deterministic Archive Safe ACK** + **Operations Runbook** |
+
+#### 2. V5 Target Architecture Diagram (Draw.io & Mermaid Preview)
+
+* **Draw.io Vector Source:** [`images/architecture_v5.drawio`](../images/architecture_v5.drawio) *(plus [`images/architecture_v4.drawio`](../images/architecture_v4.drawio) for V4)*
+* **High-Resolution PNG:** [`images/architecture_v5.png`](../images/architecture_v5.png)
+
+![V5 Architecture — Production CloudOps, CloudFormation IaC & Resilience](../images/architecture_v5.png)
+
+```mermaid
+flowchart TB
+    subgraph CFN["🔴 AWS CloudFormation Stack (infra/cloudformation/template.yaml • Native Auto-Rollback • cfn-lint CI)"]
+        direction LR
+        subgraph LAKE_QUEUE["🟢 S3 Data Lake & 🟣 Resilient SQS Messaging"]
+            CSV["Raw Olist CSVs\n(9 files • ~100k orders)"] -->|"aws s3 sync\n(raw/*.csv)"| S3["Amazon S3 Data Lake\n• raw/ (Landing)\n• archive/<ts>/ (Replay)"]
+            S3 -.->|"s3:ObjectCreated:*\n(IAM Queue Policy)"| SQS["Amazon SQS Main Queue\nolist-s3-raw-arrival-queue\nVisibilityTimeout=900s • Poll 20s"]
+            SQS -.->|"Fail 3x (Poison/0-row CSV)\nRedrivePolicy (maxReceiveCount=3)"| DLQ["Amazon SQS DLQ (V5)\nolist-s3-raw-arrival-dlq\nRetention: 14 Days"]
+            DLQ -.->|"DLQ Redrive\n(Replay after fix)"| SQS
+        end
+
+        subgraph ALERT["🔴 CloudWatch (4 Alarms) & SNS TopicPolicy (V5)"]
+            DLQ -.->|"DlqMessagesVisible >= 1 (1m)"| CW["4 CloudWatch Alarms\n• DLQ >= 1 • Age > 600s\n• InFlight >= 1 (15m) • Backlog >= 20"]
+            SQS -.->|"Age > 600s / InFlight / Backlog"| CW
+            CW -.->|"PipelineAlertTopicPolicy\nALARM / OK Trigger"| SNS["Amazon SNS Topic\nInstant Email Alert"]
+        end
+
+        subgraph AIRFLOW["🔵 Apache Airflow 3 (AssetWatcher • Zero Cron)"]
+            SQS -.->|"Long Polling 20s"| WATCH["Triggerer: AssetWatcher"]
+            WATCH --> LOAD["1. @task load_raw_from_sqs\nTEMP TABLE + Empty Guard (>0)\nDELETE+INSERT + Audit SWAPPED + Heartbeat"]
+            LOAD --> DBT["2. Astronomer Cosmos (dbt)\n4-Source affected_order_ids\nIncremental Marts + Tests"]
+            DBT --> ACK["3. @task archive_and_ack\nDeterministic archive/<audit_id>/\nAudit ARCHIVED->COMPLETED + Safe ACK"]
+        end
+
+        subgraph REDSHIFT["🔵 Amazon Redshift Serverless (4 RPUs • Audit Ledger • Recovery Points)"]
+            IAM["AWS IAM Role\nRedshiftS3ReadOnlyRole (raw/*)"] -.-> RAW["RAW LAYER (raw_data)\n+ ops.pipeline_ingestion_audit"]
+            S3 ==>|"Redshift COPY"| RAW
+            RAW --> STG["STAGING LAYER (7 Views)"]
+            STG --> MARTS["MARTS LAYER (Star Schema)\nfct_orders | dim_customers | dim_products"]
+        end
+
+        ACK -.->|"3a) Deterministic archive/<audit_id>/"| S3
+        ACK -.->|"3b) SQS DeleteMessage"| SQS
+        MARTS ==>|"scripts/export_to_csv.py"| BI["🟡 BI & Analytics\n4 Clean CSVs & Power BI"]
+    end
+```
+
+#### 3. Four Engineering Pillars of V5 (CloudFormation Stack `CREATE_COMPLETE` & Live E2E Verified)
+1. **100% Infrastructure as Code via AWS CloudFormation (`infra/cloudformation/template.yaml`):**
+   * Codifies 14 core resources (Versioned S3 Bucket + Lifecycle + Event Notification, SQS Main Queue + Queue Policy, SQS DLQ + `RedriveAllowPolicy`, least-privilege `RedshiftS3ReadOnlyRole` scoped to `raw/*`, split `AirflowRuntimePolicy` & `DlqOperatorPolicy`, 4 CloudWatch Alarms, SNS Topic + `PipelineAlertTopicPolicy` + Email Subscription) plus 4 conditional resources (AWS Budget \$5/month and VPC-secured Redshift Serverless).
+   * Leverages CloudFormation **Native Stack Auto-Rollback**, automated `cfn-lint` checks in CI, and [`scripts/empty_versioned_bucket.py`](../scripts/empty_versioned_bucket.py) for 1-command `make cfn-delete` clean-up.
+2. **Poison Message Isolation & Application Reliability (`ops.pipeline_ingestion_audit` + Safe ACK):**
+   * Enforces `RedrivePolicy` (`maxReceiveCount = 3`) on `SqsMainQueue` and `RedriveAllowPolicy: byQueue` on `SqsDeadLetterQueue`.
+   * Records `SWAPPED` → `ARCHIVED` → `COMPLETED` (or `FAILED`) transitions in [`ops.pipeline_ingestion_audit`](../scripts/create_ops_audit_table.sql), writes deterministic archive keys `archive/<audit_id>/<filename>`, blocks unsafe ACKs via [`verify_safe_to_ack_when_raw_missing`](../include/ingestion_guards.py), and refreshes SQS `VisibilityTimeout` (`900s`) across stages.
+   * **Real Airflow 3 Bug Caught & Fixed Live:** `context["triggering_asset_events"]` in Airflow 3 Task SDK is a `TriggeringAssetEventsAccessor` (`collections.abc.Mapping`, not `dict`); updated [`include/sqs_parser.py`](../include/sqs_parser.py) to check `Mapping` with a dedicated regression test (**15/15 unit tests passing**).
+3. **Proactive 4-Alarm CloudWatch & SNS TopicPolicy Alerting:**
+   * Monitors `DlqMessagesVisibleAlarm` ($\ge 1$), `MainQueueOldestMessageAlarm` ($> 600\text{s}$ SLA), `MainQueueInFlightAlarm` ($\ge 1$ for 15m), and `MainQueueBacklogAlarm` ($\ge 20$), publishing via `PipelineAlertTopicPolicy` to confirmed email subscribers.
+4. **Operations & 14-Scenario Critical Test Runbook (`docs/OPERATIONS_RUNBOOK.md`):**
+   * Documents repeatable procedures for **CloudFormation Stack Rollback**, **Redshift Serverless Recovery Point / Snapshot Restore**, **S3 Archive Replay**, **DLQ Redrive**, **100% AWS Clean-up**, and the **14-Scenario V5 Reliability Test Matrix**.
+
+#### 4. V5 Live Verification Results on AWS & Airflow 3 (Nov 18, 2026)
+> [!NOTE]
+> **Status:** ✅ **100% PASS (LIVE VERIFIED ACROSS CLOUDFORMATION, SQS DLQ, CLOUDWATCH/SNS, AIRFLOW 3 & REDSHIFT SERVERLESS)**
+> - **CloudFormation Stack (`olist-v5-pipeline-stack`):** `CREATE_COMPLETE` (14 core resources, 16 Outputs); SNS Email confirmed.
+> - **Scenario 1 — Happy Path E2E (`asset_triggered__2026-11-18T11:53:09...`):** Replayed `product_category_name_translation.csv` to S3 `raw/` → Airflow 3 `AssetWatcher` triggered automatically → **17/17 tasks PASS** (`00:03:52`), deterministic S3 archive verified, SQS ACKed cleanly, and `ops.pipeline_ingestion_audit` recorded `SWAPPED` → `ARCHIVED` → `COMPLETED` (`71` rows).
+> - **Scenario 2 — Empty CSV (`0` rows) $\rightarrow$ DLQ $\rightarrow$ CloudWatch `ALARM` $\rightarrow$ SNS Email $\rightarrow$ DLQ Redrive:**
+>   - `ensure_non_empty_stage` aborted swap (`ValueError`), transaction rollback preserved **`71` rows** in `raw_data.product_category_name_translation`, and `ops.pipeline_ingestion_audit` logged `status='FAILED', rows_loaded=0`.
+>   - After `maxReceiveCount=3`, SQS routed the poison message to `olist-v5-s3-raw-arrival-dlq-dev` (`1` message) → CloudWatch Alarms (`dlq-messages-visible`, `backlog-age`, `inflight-sustained`) entered **`ALARM`** and SNS dispatched real email alerts.
+>   - Restored valid CSV and ran `aws sqs start-message-move-task` (**DLQ Redrive**) → recovery DAG run **PASS 17/17 tasks**, `ops.pipeline_ingestion_audit` logged `SWAPPED` → `ARCHIVED` → `COMPLETED`, SQS Main & DLQ cleared to `0/0`, and **all 4/4 CloudWatch Alarms returned to `OK`**.

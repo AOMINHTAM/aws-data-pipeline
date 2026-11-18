@@ -3,6 +3,7 @@ include/sqs_parser.py
 Module tiện ích phân tích và xử lý các sự kiện AWS S3 Event Notification đẩy vào SQS Queue.
 """
 
+from collections.abc import Mapping
 import json
 from typing import Any
 import urllib.parse
@@ -121,9 +122,11 @@ def extract_messages_from_asset_events(triggering_asset_events: Any) -> list[dic
     Trích xuất danh sách SQS message dictionaries từ context['triggering_asset_events']
     do Airflow 3 AssetWatcher (SqsSensorTrigger) truyền vào DAG run.
 
+    Hỗ trợ cả dict thông thường lẫn Airflow 3 `TriggeringAssetEventsAccessor`
+    (vốn kế thừa `collections.abc.Mapping`, không phải `dict`).
     Bỏ qua các event báo lỗi (status='error') để không đánh thức Redshift ngoài ý muốn.
     """
-    if not isinstance(triggering_asset_events, dict):
+    if not isinstance(triggering_asset_events, Mapping):
         return []
 
     messages: list[dict[str, Any]] = []
@@ -132,13 +135,13 @@ def extract_messages_from_asset_events(triggering_asset_events: Any) -> list[dic
             continue
         for asset_event in events:
             extra = getattr(asset_event, "extra", None)
-            if extra is None and isinstance(asset_event, dict):
+            if extra is None and isinstance(asset_event, Mapping):
                 extra = asset_event.get("extra")
-            if not isinstance(extra, dict):
+            if not isinstance(extra, Mapping):
                 continue
 
             payload = extra.get("payload", extra)
-            if not isinstance(payload, dict):
+            if not isinstance(payload, Mapping):
                 continue
 
             if payload.get("status") == "error":

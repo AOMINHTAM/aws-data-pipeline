@@ -188,20 +188,83 @@ flowchart LR
 
 ---
 
-### BƯỚC 3: Lightweight Observability & Webhook Alerting — `🗓️ TÙY CHỌN / BACKLOG`
+### BƯỚC 3 (NÂNG CẤP LÊN V5): Production CloudOps, AWS CloudFormation IaC, SQS DLQ & CloudWatch/SNS Alerting (Chuẩn FCJ) — `✅ LIVE VERIFIED TRÊN NHÁNH feat/v5-cloudformation-resilience`
 
-#### 1. Cái gì chuẩn bị làm (What to build)
-* Viết một hàm callback gọn nhẹ trong Python (`send_pipeline_notification(context)`) gắn vào `on_success_callback` / `on_failure_callback` của DAG Airflow.
-* Bắn thông báo định dạng Markdown qua **Telegram Bot API** hoặc **Slack/Discord Incoming Webhook** (chỉ dùng thư viện chuẩn `urllib`/`requests` gọi HTTP POST).
+Sau khi đóng mốc **`v4.0.1`** cho tầng **Data Engineering Core** (S3 → SQS → Airflow 3 `AssetWatcher` → Atomic Redshift Swap → dbt Incremental + GitHub Actions CI xanh 100%), dự án bước sang thế hệ **V5 (`v5.0.0`)** nhằm đáp ứng trọn vẹn tiêu chuẩn vận hành đám mây thực tế (**CloudOps, Reproducibility, Fault Tolerance & Disaster Recovery**) theo khung **AWS First Cloud Journey (FCJ)**.
 
-#### 2. Mục đích — Vì sao phải làm (Why)
-* Trong môi trường thực tế, kỹ sư không bao giờ ngồi canh màn hình Airflow 24/7. Hệ thống phải tự động báo tin khi có sự cố (`Task Failed` / `dbt Test Failed`) hoặc gửi báo cáo tóm tắt sau mỗi batch nạp thành công.
+#### 1. Bức tranh Tiến hóa Kiến trúc (V2 → V3 → V4 → V5)
 
-#### 3. Cơ chế hoạt động bên dưới (Under-the-hood Mechanism)
-* **Airflow Execution Context (`context` dictionary):** Khi bất kỳ task hoặc DAG nào kết thúc, Airflow tự động truyền một biến `context` chứa toàn bộ metadata của lượt chạy (`dag_run`, `task_instance`, `logical_date`, `exception`, `ti.xcom_pull(...)`).
-* Hàm callback trích xuất các thông số này (ví dụ: đã nạp bao nhiêu file từ XCom, tốn bao nhiêu giây, link log ở đâu) và đóng gói thành HTTP POST payload gửi tới Webhook URL.
+| Thế hệ | Trọng tâm Kiến trúc | Hạ tầng & Vận hành | Xử lý Lỗi & Giám sát |
+| :--- | :--- | :--- | :--- |
+| **V2 (Baseline)** | Batch ELT chạy thủ công | Tạo tay trên AWS Console / CLI | Xem log thủ công trên UI |
+| **V3 (Polling)** | Lịch quét `S3KeySensor` (15 phút/lần) | Tạo tay trên AWS Console / CLI | `soft_fail=True` skip khi rỗng |
+| **V4 (`v4.0.1`)** | **Pure Push Event-Driven & Incremental Core** (`S3 Event` → `SQS` → Airflow 3 `AssetWatcher` + `TEMP TABLE` Atomic Swap + Empty-Stage Guard + 4-source `fct_orders` Incremental) | Code/SQL/CI chuẩn hóa trên Git (`.github/workflows/ci.yml`), hạ tầng AWS tạo qua CLI | Transaction Rollback + S3 Idempotent Guard + ACK Retry Safety |
+| **V5 (`v5.0.0`)** | **Production CloudOps & Resilience (FCJ Standard)** | **100% AWS CloudFormation IaC (`infra/cloudformation/template.yaml`, 14 tài nguyên mặc định)** có Native Auto-Rollback, Change Sets, `cfn-lint` CI, S3 Versioning + `scripts/empty_versioned_bucket.py`, tách `AirflowRuntimePolicy` & `DlqOperatorPolicy` | **SQS DLQ (`maxReceiveCount=3`, `RedriveAllowPolicy`) + DLQ Redrive** + **4 CloudWatch Alarms + `PipelineAlertTopicPolicy` + SNS Email** + **`ops.pipeline_ingestion_audit` & Deterministic Archive Safe ACK** + **Operations Runbook** |
 
-#### 4. Học được gì từ Bước 3 (Engineering Takeaways)
-* Hiểu cơ chế **Event Hook / Callback Lifecycle** bên trong Airflow State Machine (khi một Task chuyển trạng thái sang `SUCCESS` hoặc `FAILED`).
-* Biết cách lấy dữ liệu xuyên task qua `xcom_pull` để tạo thông báo giàu ngữ cảnh (Rich Context Alerting) thay vì chỉ báo lỗi chung chung.
+#### 2. Sơ đồ Kiến trúc Đích V5 (Draw.io & Mermaid Preview)
+
+* **File nguồn Draw.io Vector:** [`images/architecture_v5.drawio`](../images/architecture_v5.drawio) *(tương thích VS Code Draw.io Integration & Diagrams.net; đồng thời đã bổ sung [`images/architecture_v4.drawio`](../images/architecture_v4.drawio))*
+* **File ảnh xuất độ phân giải cao:** [`images/architecture_v5.png`](../images/architecture_v5.png)
+
+![Sơ đồ Kiến trúc V5 — Production CloudOps, CloudFormation IaC & Resilience](../images/architecture_v5.png)
+
+```mermaid
+flowchart TB
+    subgraph CFN["🔴 AWS CloudFormation Stack (infra/cloudformation/template.yaml • Native Auto-Rollback • cfn-lint CI)"]
+        direction LR
+        subgraph LAKE_QUEUE["🟢 S3 Data Lake & 🟣 Resilient SQS Messaging"]
+            CSV["Raw Olist CSVs\n(9 files • ~100k orders)"] -->|"aws s3 sync\n(raw/*.csv)"| S3["Amazon S3 Data Lake\n• raw/ (Landing)\n• archive/<ts>/ (Replay)"]
+            S3 -.->|"s3:ObjectCreated:*\n(IAM Queue Policy)"| SQS["Amazon SQS Main Queue\nolist-s3-raw-arrival-queue\nVisibilityTimeout=900s • Poll 20s"]
+            SQS -.->|"Fail 3x (Poison/0-row CSV)\nRedrivePolicy (maxReceiveCount=3)"| DLQ["Amazon SQS DLQ (V5)\nolist-s3-raw-arrival-dlq\nRetention: 14 Days"]
+            DLQ -.->|"DLQ Redrive\n(Replay after fix)"| SQS
+        end
+
+        subgraph ALERT["🔴 CloudWatch (4 Alarms) & SNS TopicPolicy (V5)"]
+            DLQ -.->|"DlqMessagesVisible >= 1 (1m)"| CW["4 CloudWatch Alarms\n• DLQ >= 1 • Age > 600s\n• InFlight >= 1 (15m) • Backlog >= 20"]
+            SQS -.->|"Age > 600s / InFlight / Backlog"| CW
+            CW -.->|"PipelineAlertTopicPolicy\nALARM / OK Trigger"| SNS["Amazon SNS Topic\nInstant Email Alert"]
+        end
+
+        subgraph AIRFLOW["🔵 Apache Airflow 3 (AssetWatcher • Zero Cron)"]
+            SQS -.->|"Long Polling 20s"| WATCH["Triggerer: AssetWatcher"]
+            WATCH --> LOAD["1. @task load_raw_from_sqs\nTEMP TABLE + Empty Guard (>0)\nDELETE+INSERT + Audit SWAPPED + Heartbeat"]
+            LOAD --> DBT["2. Astronomer Cosmos (dbt)\n4-Source affected_order_ids\nIncremental Marts + Tests"]
+            DBT --> ACK["3. @task archive_and_ack\nDeterministic archive/<audit_id>/\nAudit ARCHIVED->COMPLETED + Safe ACK"]
+        end
+
+        subgraph REDSHIFT["🔵 Amazon Redshift Serverless (4 RPUs • Audit Ledger • Recovery Points)"]
+            IAM["AWS IAM Role\nRedshiftS3ReadOnlyRole (raw/*)"] -.-> RAW["RAW LAYER (raw_data)\n+ ops.pipeline_ingestion_audit"]
+            S3 ==>|"Redshift COPY"| RAW
+            RAW --> STG["STAGING LAYER (7 Views)"]
+            STG --> MARTS["MARTS LAYER (Star Schema)\nfct_orders | dim_customers | dim_products"]
+        end
+
+        ACK -.->|"3a) Deterministic archive/<audit_id>/"| S3
+        ACK -.->|"3b) SQS DeleteMessage"| SQS
+        MARTS ==>|"scripts/export_to_csv.py"| BI["🟡 BI & Analytics\n4 Clean CSVs & Power BI"]
+    end
+```
+
+#### 3. 4 Trụ cột Kỹ thuật của V5 (Đã triển khai Stack CloudFormation `CREATE_COMPLETE` & Nghiệm thu Live E2E)
+1. **100% Infrastructure as Code bằng AWS CloudFormation (`infra/cloudformation/template.yaml`):**
+   * Định nghĩa 14 tài nguyên mặc định (S3 Bucket bật Versioning + Lifecycle + Event Notification, SQS Main Queue + Queue Policy, SQS DLQ + `RedriveAllowPolicy`, IAM Role `RedshiftS3ReadOnlyRole` thu hẹp chỉ đọc `raw/*`, tách riêng `AirflowRuntimePolicy` & `DlqOperatorPolicy`, 4 CloudWatch Alarms, SNS Topic + `PipelineAlertTopicPolicy` + Email Subscription) cùng 4 tài nguyên tùy chọn (AWS Budget \$5/tháng và Redshift Serverless khóa VPC/SecurityGroup).
+   * Tận dụng **Native Stack Auto-Rollback** của CloudFormation, kiểm tra tĩnh tự động bằng `cfn-lint` trong CI, và script [`scripts/empty_versioned_bucket.py`](../scripts/empty_versioned_bucket.py) giúp `make cfn-delete` xóa sạch cả S3 Versions.
+2. **Cô lập Gói tin Lỗi (Poison Message Isolation) & Độ tin cậy Ứng dụng (`ops.pipeline_ingestion_audit` + Safe ACK):**
+   * Gắn `RedrivePolicy` (`maxReceiveCount = 3`) lên `SqsMainQueue` và `RedriveAllowPolicy: byQueue` lên `SqsDeadLetterQueue`.
+   * Bảng [`ops.pipeline_ingestion_audit`](../scripts/create_ops_audit_table.sql) lưu vết `SWAPPED` → `ARCHIVED` → `COMPLETED` (hoặc `FAILED`), đường dẫn lưu trữ cố định (**deterministic**) `archive/<audit_id>/<filename>`, kết hợp [`verify_safe_to_ack_when_raw_missing`](../include/ingestion_guards.py) chặn ACK nhầm và gia hạn `change_message_visibility(900s)` xuyên chặng.
+   * **Bug Airflow 3 thật đã phát hiện & vá trong kiểm thử live:** `context["triggering_asset_events"]` trong Airflow 3 Task SDK là `TriggeringAssetEventsAccessor` (kế thừa `collections.abc.Mapping`, không phải `dict`), đã cập nhật [`include/sqs_parser.py`](../include/sqs_parser.py) sang kiểm tra `Mapping` kèm unit test (**15/15 unit tests PASS**).
+3. **Giám sát Chủ động (4 CloudWatch Alarms + Amazon SNS TopicPolicy & Email Alert):**
+   * Thiết lập 4 CloudWatch Alarms (`TreatMissingData: notBreaching`): `DlqMessagesVisibleAlarm` ($\ge 1$), `MainQueueOldestMessageAlarm` ($> 600\text{s}$ SLA), `MainQueueInFlightAlarm` ($\ge 1$ liên tục 15 phút), và `MainQueueBacklogAlarm` ($\ge 20$), publish qua `PipelineAlertTopicPolicy` tới email đã xác nhận.
+4. **Sổ tay Vận hành & Bộ 14 Kịch bản Kiểm thử (`docs/OPERATIONS_RUNBOOK.vi.md`):**
+   * Chuẩn hóa quy trình **Stack Rollback**, **Backup & Restore** bằng **Redshift Serverless Recovery Points / Snapshots**, **S3 Event Replay**, **DLQ Redrive**, **Clean-up 100% về \$0**, và **V5 Critical Test Matrix (14 kịch bản P0/P1)**.
+
+#### 4. Kết quả Nghiệm thu Live V5 trên AWS & Airflow 3 (2026-11-18)
+> [!NOTE]
+> **Trạng thái:** ✅ **ĐẠT 100% (LIVE VERIFIED TRÊN AWS CLOUDFORMATION, SQS DLQ, CLOUDWATCH/SNS, AIRFLOW 3 & REDSHIFT SERVERLESS)**
+> - **CloudFormation Stack (`olist-v5-pipeline-stack`):** `CREATE_COMPLETE` đủ 14 tài nguyên & 16 Outputs; SNS Email đã Confirmed.
+> - **Kịch bản 1 — Happy Path E2E (`asset_triggered__2026-11-18T11:53:09...`):** Replay `product_category_name_translation.csv` vào S3 `raw/` → Airflow 3 `AssetWatcher` kích hoạt tự động → **17/17 tasks PASS** (`00:03:52`), archive deterministic lên S3, ACK SQS sạch, và `ops.pipeline_ingestion_audit` ghi đủ `SWAPPED` → `ARCHIVED` → `COMPLETED` (`71` dòng).
+> - **Kịch bản 2 — Empty CSV (`0` dòng) $\rightarrow$ DLQ $\rightarrow$ CloudWatch `ALARM` $\rightarrow$ SNS Email $\rightarrow$ DLQ Redrive:**
+>   - `ensure_non_empty_stage` chặn swap (`ValueError`), rollback giữ nguyên **`71` dòng** trong `raw_data.product_category_name_translation` và ghi `status='FAILED', rows_loaded=0` vào `ops.pipeline_ingestion_audit`.
+>   - Sau `maxReceiveCount=3`, SQS chuyển message sang `olist-v5-s3-raw-arrival-dlq-dev` (`1` message) → CloudWatch Alarms (`dlq-messages-visible`, `backlog-age`, `inflight-sustained`) chuyển Đỏ **`In alarm`** và SNS gửi email cảnh báo thật tới Gmail.
+>   - Sau khi khôi phục CSV hợp lệ và chạy `aws sqs start-message-move-task` (**DLQ Redrive**), DAG Run phục hồi **PASS 17/17 tasks**, `ops.pipeline_ingestion_audit` ghi tiếp `SWAPPED` → `ARCHIVED` → `COMPLETED`, SQS Main & DLQ về `0/0`, và **4/4 CloudWatch Alarms tự quay về Xanh `OK`**.
 
