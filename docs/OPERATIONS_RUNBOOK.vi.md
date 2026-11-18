@@ -219,7 +219,7 @@ aws cloudformation list-stacks \
 
 ## 6. Truy vấn Đối soát Nhật ký Vận hành (`ops.pipeline_ingestion_audit`)
 
-Mỗi lượt chạy của DAG `ecommerce_aws_data_pipeline` tự động ghi nhận trạng thái nạp (`SWAPPED` / `COMPLETED` / `FAILED`) và đường dẫn `archive_key` vào bảng `ops.pipeline_ingestion_audit` trên Redshift:
+Mỗi lượt chạy của DAG `ecommerce_aws_data_pipeline` tự động ghi nhận trạng thái nạp (`SWAPPED` / `ARCHIVED` / `COMPLETED` / `FAILED`) và đường dẫn `archive_key` vào bảng `ops.pipeline_ingestion_audit` trên Redshift:
 
 ```sql
 -- Kiểm tra 20 lượt xử lý file gần nhất và trạng thái đối soát
@@ -249,7 +249,7 @@ LIMIT 20;
 | 4 | **dbt Test Failure** | P0 | Giả lập lỗi dbt test → Task 3 (`archive_and_ack`) không chạy, file giữ ở `raw/`, message chưa ACK. |
 | 5 | **Archive Copy Verification** | P0 | Kiểm tra `check_for_key(dest_key)` sau `copy_object` trước khi ghi `ARCHIVED` và xóa `raw/`. |
 | 6 | **Safe ACK Guard (Missing Raw)** | P0 | Nếu `raw/` mất khi retry bước 3, `verify_safe_to_ack_when_raw_missing` bắt buộc `status in {'ARCHIVED','COMPLETED'}` VÀ đúng deterministic `archive_key` tồn tại. |
-| 7 | **Audit Insert Resilience** | P0 | Lỗi ghi audit được bắt trong `_record_audit_event` (best-effort log) và chặn ACK nhầm nếu thiếu `ARCHIVED`/`COMPLETED`. |
+| 7 | **Audit Insert Integrity (Fail-Closed)** | P0 | `_record_audit_event` chạy fail-closed (`raise_on_error=True`) cho `SWAPPED`/`ARCHIVED`/`COMPLETED` để chặn xóa `raw/` hoặc ACK SQS nếu mất sổ cái, và best-effort (`raise_on_error=False`) khi ghi log `FAILED`. |
 | 8 | **SQS ACK Retry Safety** | P0 | Nếu `DeleteMessage` lỗi mạng, `_delete_sqs_handles` trả về `failed_handles` và raise `RuntimeError` để retry riêng Task 3. |
 | 9 | **Visibility Timeout Heartbeat** | P0 | `_refresh_sqs_visibility` gọi `change_message_visibility(900s)` ngay sau Redshift swap và trước bước archive/ACK. |
 | 10 | **Triggerer Restart** | P0 | `delete_message_on_reception=False` giữ message an toàn trên SQS khi Triggerer khởi động lại. |

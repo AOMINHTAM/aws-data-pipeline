@@ -205,7 +205,7 @@ aws s3 cp \
 
 ## 6. Querying the Ingestion Audit Ledger (`ops.pipeline_ingestion_audit`)
 
-Every run of `ecommerce_aws_data_pipeline` records per-table lifecycle transitions (`SWAPPED` / `COMPLETED` / `FAILED`) and verified S3 `archive_key` paths in `ops.pipeline_ingestion_audit`:
+Every run of `ecommerce_aws_data_pipeline` records per-table lifecycle transitions (`SWAPPED` / `ARCHIVED` / `COMPLETED` / `FAILED`) and verified S3 `archive_key` paths in `ops.pipeline_ingestion_audit`:
 
 ```sql
 SELECT
@@ -234,7 +234,7 @@ LIMIT 20;
 | 4 | **dbt Test Failure** | P0 | Simulated dbt test failure blocks Task 3 (`archive_and_ack`), keeping raw object on S3 and message un-ACKed. |
 | 5 | **Archive Copy Verification** | P0 | `check_for_key(dest_key)` verified after `copy_object` and `ARCHIVED` recorded before deleting `raw/`. |
 | 6 | **Safe ACK Guard (Missing Raw)** | P0 | When `raw/` is missing on step 3 retry, `verify_safe_to_ack_when_raw_missing` enforces `status in {'ARCHIVED','COMPLETED'}` AND matching deterministic `archive_key`. |
-| 7 | **Audit Insert Resilience** | P0 | Audit errors are caught safely and premature ACK is blocked if `ARCHIVED`/`COMPLETED` proof is absent. |
+| 7 | **Audit Insert Integrity (Fail-Closed)** | P0 | `_record_audit_event` fails closed (`raise_on_error=True`) for `SWAPPED`/`ARCHIVED`/`COMPLETED` to block `raw/` deletion or SQS ACK without ledger proof, and stays best-effort (`raise_on_error=False`) for `FAILED` logs. |
 | 8 | **SQS ACK Retry Safety** | P0 | Failed `DeleteMessage` calls return `failed_handles` and raise `RuntimeError` so Airflow retries Task 3 independently. |
 | 9 | **Visibility Timeout Heartbeat** | P0 | `_refresh_sqs_visibility` calls `change_message_visibility(900s)` post-Redshift swap and pre-archive/ACK. |
 | 10 | **Triggerer Restart** | P0 | `delete_message_on_reception=False` preserves messages on SQS across Triggerer restarts. |
