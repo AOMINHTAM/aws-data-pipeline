@@ -1,0 +1,111 @@
+<mxfile host="app.diagrams.net" modified="2026-11-17T12:30:00.000Z" agent="Antigravity" version="21.0.0" type="device">
+  <diagram id="aws-elt-architecture-v5" name="AWS E-Commerce Data Pipeline V5 (FCJ CloudOps, CloudFormation IaC &amp; Resilience)">
+    <mxGraphModel dx="2640" dy="1340" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="0" pageScale="1" pageWidth="2640" pageHeight="1340" background="#ffffff" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- 1. TOP BOX: APACHE AIRFLOW 3 (Pure Event-Driven Scheduling) -->
+        <mxCell id="airflow_v5_box" value="APACHE AIRFLOW 3 (Astro CLI &amp; Docker)  •  Pure Event-Driven Orchestration (V5)&#xa;Schedule: [sqs_raw_arrival_asset] (Zero Cron!)  |  catchup=False  |  max_active_runs=1  |  Weekly Full-Refresh DAG (Paused)" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;sketch=1;curveFitting=1;jiggle=2;strokeWidth=2;strokeColor=#1565C0;fillColor=#E3F2FD;fontColor=#0D47A1;verticalAlign=top;spacingTop=10;fontFamily=Comic Sans MS;fontSize=17;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="860" y="80" width="1290" height="225" as="geometry" />
+        </mxCell>
+
+        <!-- 4 Stage Cards inside Airflow 3 -->
+        <mxCell id="af_watcher" value="Triggerer: AssetWatcher&#xa;SqsSensorTrigger&#xa;SQS Long Polling (20s)&#xa;Empty -&gt; 0 DAG Runs ($0)" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;sketch=1;strokeWidth=1.8;strokeColor=#E65100;fillColor=#FFF3E0;fontColor=#E65100;fontFamily=Comic Sans MS;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="885" y="160" width="275" height="122" as="geometry" />
+        </mxCell>
+        <mxCell id="af_load" value="1. @task load_raw&#xa;load_raw_from_sqs&#xa;Temp Stage + Empty Guard (&gt;0)&#xa;DELETE + INSERT (Atomic)" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;sketch=1;strokeWidth=1.8;strokeColor=#1565C0;fillColor=#ffffff;fontColor=#0D47A1;fontFamily=Comic Sans MS;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="1195" y="160" width="285" height="122" as="geometry" />
+        </mxCell>
+        <mxCell id="af_dbt" value="2. Astronomer Cosmos&#xa;dbt_transformation_and_tests&#xa;4-Source affected_order_ids&#xa;Incremental Marts + dbt Tests" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;sketch=1;strokeWidth=1.8;strokeColor=#E65100;fillColor=#FFF3E0;fontColor=#E65100;fontFamily=Comic Sans MS;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="1515" y="160" width="295" height="122" as="geometry" />
+        </mxCell>
+        <mxCell id="af_ack" value="3. @task archive_ack&#xa;archive_and_ack_sqs_messages&#xa;Archive -&gt; Clean raw/&#xa;SQS ACK + Retry Safety" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;sketch=1;strokeWidth=1.8;strokeColor=#2E7D32;fillColor=#E8F5E9;fontColor=#1B5E20;fontFamily=Comic Sans MS;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="1845" y="160" width="280" height="122" as="geometry" />
+        </mxCell>
+
+        <mxCell id="af_e1" value="" style="endArrow=open;endFill=0;endSize=12;html=1;sketch=1;strokeWidth=2;strokeColor=#1e1e1e;" edge="1" parent="1" source="af_watcher" target="af_load">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="af_e2" value="" style="endArrow=open;endFill=0;endSize=12;html=1;sketch=1;strokeWidth=2;strokeColor=#1e1e1e;" edge="1" parent="1" source="af_load" target="af_dbt">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="af_e3" value="" style="endArrow=open;endFill=0;endSize=12;html=1;sketch=1;strokeWidth=2;strokeColor=#1e1e1e;" edge="1" parent="1" source="af_dbt" target="af_ack">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- 2. AMAZON SQS MAIN QUEUE + DLQ (Purple Zone) -->
+        <mxCell id="sqs_main_box" value="Amazon SQS Main Queue&#xa;olist-s3-raw-arrival-queue&#xa;VisibilityTimeout: 900s • Long Poll 20s&#xa;IAM Resource Policy (S3 -&gt; SQS)&#xa;RedrivePolicy (maxReceiveCount = 3)" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;sketch=1;curveFitting=1;jiggle=2;strokeWidth=2;strokeColor=#7B1FA2;fillColor=#F3E5F5;fontColor=#4A148C;fontFamily=Comic Sans MS;fontSize=13;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="450" y="95" width="305" height="175" as="geometry" />
+        </mxCell>
+
+        <mxCell id="sqs_dlq_box" value="Amazon SQS Dead-Letter Queue (DLQ)&#xa;olist-s3-raw-arrival-dlq&#xa;Isolates Poison / Empty-Stage CSVs&#xa;Retention: 14 Days • DLQ Redrive Ready" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;sketch=1;curveFitting=1;jiggle=2;strokeWidth=2;strokeColor=#7B1FA2;fillColor=#F3E5F5;fontColor=#4A148C;fontFamily=Comic Sans MS;fontSize=13;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="40" y="95" width="305" height="150" as="geometry" />
+        </mxCell>
+
+        <!-- 3. CLOUDWATCH ALARMS + AMAZON SNS (Red Observability Zone) -->
+        <mxCell id="cw_sns_box" value="CloudWatch Alarms + Amazon SNS&#xa;• DlqMessagesVisible &gt; 0 (1 min)&#xa;• MainQueueOldestMsg &gt; 900s&#xa;SNS Topic -&gt; Instant Email Alert" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;sketch=1;curveFitting=1;jiggle=2;strokeWidth=2;strokeColor=#C62828;fillColor=#FFEBEE;fontColor=#B71C1C;fontFamily=Comic Sans MS;fontSize=13;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="40" y="305" width="305" height="145" as="geometry" />
+        </mxCell>
+
+        <!-- Main Queue <-> DLQ & DLQ -> CloudWatch/SNS Arrows -->
+        <mxCell id="arrow_main_dlq" value="Fail 3x -&gt; DLQ&#xa;(maxReceiveCount=3)" style="endArrow=open;endFill=0;endSize=12;html=1;sketch=1;dashed=1;strokeWidth=2;strokeColor=#7B1FA2;fontFamily=Comic Sans MS;fontSize=12;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="sqs_main_box" target="sqs_dlq_box">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="arrow_dlq_cw" value="Metric &gt; 0&#xa;Trigger Alarm" style="endArrow=open;endFill=0;endSize=12;html=1;sketch=1;dashed=1;strokeWidth=2;strokeColor=#C62828;fontFamily=Comic Sans MS;fontSize=12;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="sqs_dlq_box" target="cw_sns_box">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- S3 -> SQS Push Notification -->
+        <mxCell id="arrow_s3_sqs" value="s3:ObjectCreated:*&#xa;Push Event (raw/*.csv)" style="endArrow=open;endFill=0;endSize=14;html=1;sketch=1;dashed=1;strokeWidth=2;strokeColor=#7B1FA2;fontFamily=Comic Sans MS;fontSize=13;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="s3_box" target="sqs_main_box">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- SQS -> Airflow AssetWatcher -->
+        <mxCell id="arrow_sqs_af" value="Triggerer Wake&#xa;(Long Poll 20s)" style="endArrow=open;endFill=0;endSize=14;html=1;sketch=1;dashed=1;strokeWidth=2;strokeColor=#E65100;fontFamily=Comic Sans MS;fontSize=13;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="sqs_main_box" target="af_watcher">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- 4. OLIST RAW CSV & S3 DATA LAKE (Green Zone) -->
+        <mxCell id="raw_csv_box" value="Raw E-Commerce&#xa;Data (Olist)&#xa;(9 CSVs • ~100k Orders)" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;sketch=1;strokeWidth=2;strokeColor=#1e1e1e;fillColor=#ffffff;fontFamily=Comic Sans MS;fontSize=15;" vertex="1" parent="1">
+          <mxGeometry x="40" y="535" width="235" height="175" as="geometry" />
+        </mxCell>
+        <mxCell id="s3_box" value="Amazon S3 Data Lake&#xa;raw/ (Landing Zone)&#xa;archive/&lt;ts&gt;/ (Processed &amp; Replay)" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;sketch=1;strokeWidth=2;strokeColor=#2E7D32;fillColor=#E8F5E9;fontColor=#1B5E20;fontFamily=Comic Sans MS;fontSize=15;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="450" y="490" width="285" height="255" as="geometry" />
+        </mxCell>
+        <mxCell id="arrow_csv_s3" value="Bash &amp; AWS CLI&#xa;(upload_to_s3.sh)&#xa;aws s3 sync -&gt; raw/" style="endArrow=open;endFill=0;endSize=14;html=1;sketch=1;strokeWidth=2;strokeColor=#1e1e1e;fontFamily=Comic Sans MS;fontSize=13;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="raw_csv_box" target="s3_box">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- 5. AMAZON REDSHIFT SERVERLESS (Blue & Orange Zones) -->
+        <mxCell id="redshift_outer" value="AMAZON REDSHIFT SERVERLESS (4 RPUs • CLOUD DATA WAREHOUSE)&#xa;AWS Budgets ($5/mo)  |  VPC SG (5439)  |  Zero Idle RPU  |  Recovery Points &amp; Snapshots (RPO/RTO)" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;sketch=1;strokeWidth=2;strokeColor=#1565C0;fillColor=#E3F2FD;fontColor=#0D47A1;verticalAlign=top;spacingTop=12;fontFamily=Comic Sans MS;fontSize=17;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="900" y="395" width="1250" height="530" as="geometry" />
+        </mxCell>
+        <mxCell id="raw_layer" value="RAW LAYER&#xa;(raw_data)&#xa;9 Tables • Temp Stage Swap&#xa;Empty-Stage Guard (&gt;0 rows)" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;sketch=1;strokeWidth=2;strokeColor=#1565C0;fillColor=#ffffff;fontColor=#0D47A1;fontFamily=Comic Sans MS;fontSize=14;" vertex="1" parent="1">
+          <mxGeometry x="945" y="535" width="280" height="165" as="geometry" />
+        </mxCell>
+        <mxCell id="stg_layer" value="STAGING LAYER&#xa;(public_staging)&#xa;7 Views (stg_*)" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;sketch=1;strokeWidth=2;strokeColor=#E65100;fillColor=#FFF3E0;fontColor=#E65100;fontFamily=Comic Sans MS;fontSize=14;" vertex="1" parent="1">
+          <mxGeometry x="1315" y="535" width="280" height="165" as="geometry" />
+        </mxCell>
+        <mxCell id="marts_layer" value="MARTS LAYER&#xa;(public_marts • Star Schema)&#xa;fct_orders (Incremental • 4-Source)&#xa;dim_customers (Incremental LTV)&#xa;dim_products (Table) • delete+insert" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;sketch=1;strokeWidth=2;strokeColor=#1565C0;fillColor=#ffffff;fontColor=#0D47A1;fontFamily=Comic Sans MS;fontSize=14;" vertex="1" parent="1">
+          <mxGeometry x="1685" y="535" width="390" height="165" as="geometry" />
+        </mxCell>
+
+        <!-- IAM Role (Red Zone) -->
+        <mxCell id="iam_box" value="AWS IAM Role&#xa;(RedshiftS3ReadOnlyRole)&#xa;STS AssumeRole (Least Privilege)" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;sketch=1;strokeWidth=2;strokeColor=#C62828;fillColor=#FFEBEE;fontColor=#B71C1C;fontFamily=Comic Sans MS;fontSize=14;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="515" y="790" width="335" height="115" as="geometry" />
+        </mxCell>
+
+        <!-- BI & Analytics (Yellow Zone) -->
+        <mxCell id="bi_box" value="BI &amp; ANALYTICS&#xa;Python (export_to_csv.py)&#xa;redshift-connector + pandas&#xa;4 Clean CSVs &amp; Power BI" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;sketch=1;strokeWidth=2;strokeColor=#F57F17;fillColor=#FFFDE7;fontColor=#F57F17;fontFamily=Comic Sans MS;fontSize=15;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="2290" y="515" width="310" height="210" as="geometry" />
+        </mxCell>
+
+        <!-- 6. BOTTOM BANNER: AWS CLOUDFORMATION IaC, CI/CD & DISASTER RECOVERY (V5 CloudOps) -->
+        <mxCell id="cfn_banner" value="AWS CLOUDFORMATION IaC &amp; CLOUDOPS GOVERNANCE (infra/cloudformation/template.yaml  •  GitHub Actions CI + cfn-lint)&#xa;• 100% Reproducible Stack (S3, SQS + DLQ, IAM, Redshift Serverless, CloudWatch Alarms, SNS, AWS Budgets)  |  Native Auto-Rollback on Failure&#xa;• Conditional FinOps Toggle (DeployRedshift=true/false for $0 Free-Tier Testing)  |  Operations Runbook (Recovery Point Restore, S3 Archive Replay, DLQ Redrive &amp; 100% Clean-up)" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;sketch=1;strokeWidth=2;strokeColor=#C62828;fillColor=#FFEBEE;fontColor=#B71C1C;fontFamily=Comic Sans MS;fontSize=15;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="40" y="965" width="2560" height="110" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

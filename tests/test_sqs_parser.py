@@ -3,6 +3,7 @@ tests/test_sqs_parser.py
 Unit tests kiểm thử logic phân tích cú pháp SQS Message và định tuyến file S3.
 """
 
+from collections.abc import Mapping
 import json
 import unittest
 from types import SimpleNamespace
@@ -208,6 +209,37 @@ class TestSqsParser(unittest.TestCase):
         # Gộp cùng message nhận trực tiếp từ SQS -> không bị nhân đôi
         deduped = deduplicate_sqs_messages(extracted + [dict(sqs_msg)])
         self.assertEqual(len(deduped), 1)
+
+    def test_extract_messages_supports_airflow3_mapping_accessor(self):
+        class FakeAssetEventsAccessor(Mapping):
+            def __init__(self, data):
+                self._data = data
+
+            def __getitem__(self, key):
+                return self._data[key]
+
+            def __iter__(self):
+                return iter(self._data)
+
+            def __len__(self):
+                return len(self._data)
+
+        sqs_msg = {"MessageId": "m-accessor", "ReceiptHandle": "rh-accessor", "Body": "{}"}
+        accessor = FakeAssetEventsAccessor(
+            {
+                "sqs://olist-v5-s3-raw-arrival-queue-dev/": [
+                    SimpleNamespace(
+                        extra={
+                            "from_trigger": True,
+                            "payload": {"status": "success", "message_batch": [sqs_msg]},
+                        }
+                    )
+                ]
+            }
+        )
+        extracted = extract_messages_from_asset_events(accessor)
+        self.assertEqual(len(extracted), 1)
+        self.assertEqual(extracted[0]["ReceiptHandle"], "rh-accessor")
 
 
 if __name__ == "__main__":

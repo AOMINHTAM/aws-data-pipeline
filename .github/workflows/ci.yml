@@ -25,11 +25,14 @@ jobs:
           python-version: "3.12"
           cache: "pip"
 
-      - name: Install Ruff linter
-        run: python -m pip install --upgrade pip ruff
+      - name: Install Ruff and CloudFormation linter (cfn-lint)
+        run: python -m pip install --upgrade pip ruff cfn-lint
 
       - name: Run Ruff static analysis
         run: ruff check dags/ include/ scripts/ tests/
+
+      - name: Validate AWS CloudFormation IaC template (cfn-lint)
+        run: cfn-lint infra/cloudformation/template.yaml
 
       - name: Verify Python bytecode compilation
         run: |
@@ -39,6 +42,7 @@ jobs:
             include/ingestion_guards.py \
             include/sqs_parser.py \
             scripts/export_to_csv.py \
+            scripts/empty_versioned_bucket.py \
             tests/test_ingestion_guards.py \
             tests/test_sqs_parser.py
 
