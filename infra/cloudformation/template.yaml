@@ -129,8 +129,9 @@ Parameters:
     Default: ""
     NoEcho: true
     Description: >-
-      Admin password for Redshift Serverless (required only when DeployRedshift='true';
-      must be 8-64 chars with uppercase, lowercase, and number). Masked via NoEcho.
+      (Optional) Admin password for Redshift Serverless when DeployRedshift='true' (must be
+      8-64 chars with uppercase, lowercase, and number). If left blank, AWS manages the admin
+      password automatically via AWS Secrets Manager (ManageAdminPassword=true). Masked via NoEcho.
 
   RedshiftPubliclyAccessible:
     Type: String
@@ -177,6 +178,7 @@ Conditions:
   HasRedshiftSubnets: !And
     - !Condition ShouldDeployRedshift
     - !Not [!Equals [!Ref RedshiftSubnetIds, ""]]
+  HasRedshiftPassword: !Not [!Equals [!Ref RedshiftAdminPassword, ""]]
   IsRedshiftPublic: !Equals [!Ref RedshiftPubliclyAccessible, "true"]
 
 Resources:
@@ -639,7 +641,8 @@ Resources:
       NamespaceName: !Sub "${ProjectPrefix}-namespace-${EnvironmentName}"
       DbName: !Ref RedshiftDatabaseName
       AdminUsername: !Ref RedshiftAdminUsername
-      AdminUserPassword: !Ref RedshiftAdminPassword
+      ManageAdminPassword: !If [HasRedshiftPassword, !Ref "AWS::NoValue", true]
+      AdminUserPassword: !If [HasRedshiftPassword, !Ref RedshiftAdminPassword, !Ref "AWS::NoValue"]
       DefaultIamRoleArn: !GetAtt RedshiftS3ReadOnlyRole.Arn
       IamRoles:
         - !GetAtt RedshiftS3ReadOnlyRole.Arn
@@ -647,8 +650,6 @@ Resources:
   RedshiftServerlessWorkgroup:
     Type: AWS::RedshiftServerless::Workgroup
     Condition: ShouldDeployRedshift
-    DependsOn:
-      - RedshiftServerlessNamespace
     Properties:
       WorkgroupName: !Sub "${ProjectPrefix}-workgroup-${EnvironmentName}"
       NamespaceName: !Ref RedshiftServerlessNamespace
