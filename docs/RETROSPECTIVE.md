@@ -8,21 +8,23 @@
 
 | Attribute | Details |
 | :--- | :--- |
-| **Project Name** | **End-to-End Event-Driven AWS E-Commerce Data Pipeline & Kimball Star Schema Analytics** |
+| **Project Name** | **End-to-End Event-Driven AWS E-Commerce Data Pipeline & Kimball Star Schema Analytics (V5 — `5.0.0`)** |
 | **Data Engineer** | Ao Minh Tam ([@AOMINHTAM](https://github.com/AOMINHTAM)) |
 | **Repository** | [github.com/AOMINHTAM/aws-data-pipeline](https://github.com/AOMINHTAM/aws-data-pipeline) |
 | **Dataset** | Olist Brazilian E-Commerce Dataset (~120 MB, ~100k orders, 9 relational tables) |
-| **Core Stack** | AWS (S3, SQS, Redshift Serverless, IAM), dbt Core, Apache Airflow 3 (Astro CLI & Astronomer Cosmos), Docker, Python (`redshift-connector`, `pandas`), Ubuntu WSL2 |
-| **Milestones** | **V2 (Baseline):** Oct 2026 • **V3 (S3 Sensor):** Nov 12, 2026 • **V4 Step 1 (S3 → SQS → Airflow):** Nov 13, 2026 • **V4 Step 2 (dbt Incremental):** Nov 13, 2026 |
-| **Status** | ✅ **100% ACCEPTED & LIVE VERIFIED** |
+| **Core Stack** | AWS (CloudFormation, S3, SQS + DLQ, CloudWatch, SNS, Redshift Serverless, IAM), dbt Core, Apache Airflow 3 (Astro CLI & Astronomer Cosmos), Docker, Python (`redshift-connector`, `boto3`, `pandas`), Ubuntu WSL2 |
+| **Milestones** | **V2 (Baseline):** Oct 2026 • **V3 (S3 Sensor):** Nov 12, 2026 • **V4 (`v4.0.1` Event-Driven & Incremental):** Nov 13, 2026 • **V5 (`5.0.0` CloudFormation IaC, DLQ & Observability):** Nov 18, 2026 |
+| **Status** | ✅ **100% ACCEPTED, LIVE VERIFIED & RELEASED (`5.0.0`)** |
 
 ---
 
-## 🏗️ SYSTEM ARCHITECTURE EVOLUTION (V2 → V4)
+## 🏗️ SYSTEM ARCHITECTURE EVOLUTION (V2 → V5)
 
-| V2 (Manual Batch Baseline) | V4 (Pure Event-Driven & Incremental ELT) |
+| V2 (Manual Batch Baseline) | V5 (`5.0.0` — CloudFormation IaC, DLQ & Observability) |
 | :---: | :---: |
-| ![V2 Architecture](../images/architecture.png) | ![V4 Architecture](../images/architecture_v4.png) |
+| ![V2 Architecture](../images/architecture.png) | ![V5 Architecture](../images/architecture_v5.png) |
+
+> 📖 **Detailed V5 Documentation:** [V5 Architecture Deep Dive (V5_DEEP_DIVE.md)](V5_DEEP_DIVE.md) • [Operations & DR Runbook (OPERATIONS_RUNBOOK.md)](OPERATIONS_RUNBOOK.md)
 
 ---
 
@@ -143,9 +145,9 @@ flowchart LR
 
 ---
 
-### STEP 3 (UPGRADING TO V5): Production CloudOps, AWS CloudFormation IaC, SQS DLQ & CloudWatch/SNS Alerting (FCJ Standard) — `✅ LIVE VERIFIED ON feat/v5-cloudformation-resilience`
+### STEP 3 (UPGRADING TO V5): Production CloudOps, AWS CloudFormation IaC, SQS DLQ & CloudWatch/SNS Alerting (FCJ Standard) — `✅ MERGED TO MAIN & RELEASED 5.0.0 (LIVE VERIFIED)`
 
-Following the **`v4.0.1`** release that locked in the **Data Engineering Core** (S3 → SQS → Airflow 3 `AssetWatcher` → Per-Table Atomic Redshift Swap → dbt Multi-Source Incremental Marts + 100% Green GitHub Actions CI), the project is evolving into **V5 (`v5.0.0`)** to meet full **AWS First Cloud Journey (FCJ)** production engineering standards for reproducibility, poison-message fault tolerance, active alerting, and disaster recovery.
+Following the **`v4.0.1`** release that locked in the **Data Engineering Core** (S3 → SQS → Airflow 3 `AssetWatcher` → Per-Table Atomic Redshift Swap → dbt Multi-Source Incremental Marts + 100% Green GitHub Actions CI), the project completed and released **V5 (`5.0.0`, PR #4 at `692050c`)** to meet full **AWS First Cloud Journey (FCJ)** production engineering standards for reproducibility, poison-message fault tolerance, active alerting, and disaster recovery. For a full component-by-component breakdown, see [`docs/V5_DEEP_DIVE.md`](V5_DEEP_DIVE.md).
 
 #### 1. Architectural Evolution Matrix (V2 → V3 → V4 → V5)
 

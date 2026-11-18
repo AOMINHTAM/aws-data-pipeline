@@ -163,6 +163,8 @@ aws_data_pipeline/
 │   ├── ingestion_guards.py                   # Empty-stage guard, deterministic archive key, and Safe ACK verifier
 │   └── sqs_parser.py                         # SQS S3 Event JSON parser, Mapping accessor extractor & deduplicator
 ├── docs/
+│   ├── V5_DEEP_DIVE.md                       # Detailed V5 CloudFormation, Fault-Tolerance, Observability & FinOps Deep Dive (EN)
+│   ├── V5_DEEP_DIVE.vi.md                    # Detailed V5 CloudFormation, Fault-Tolerance, Observability & FinOps Deep Dive (VI)
 │   ├── OPERATIONS_RUNBOOK.md                 # V5 Operations, Rollback, DLQ Redrive, DR & Clean-up Runbook (EN)
 │   ├── OPERATIONS_RUNBOOK.vi.md              # V5 Operations, Rollback, DLQ Redrive, DR & Clean-up Runbook (VI)
 │   ├── RETROSPECTIVE.md                      # Engineering retrospective & V2->V5 verification report (EN)
@@ -243,4 +245,4 @@ make cfn-status
 * **Minh Tam Ao** - [GitHub](https://github.com/AOMINHTAM)
 * Project: *AWS E-Commerce Data Pipeline V5 (CloudFormation IaC, Fault-Tolerant Event-Driven ELT & CloudOps)*
 
-> 📖 *Read more: [Project Retrospective (EN)](docs/RETROSPECTIVE.md) | [Bản Tiếng Việt](docs/RETROSPECTIVE.vi.md) • [Operations & DR Runbook (EN)](docs/OPERATIONS_RUNBOOK.md) | [Sổ tay Vận hành (VI)](docs/OPERATIONS_RUNBOOK.vi.md).*
+> 📖 *Read more: [V5 Deep Dive (EN)](docs/V5_DEEP_DIVE.md) | [Giải thích chi tiết V5 (VI)](docs/V5_DEEP_DIVE.vi.md) • [Project Retrospective (EN)](docs/RETROSPECTIVE.md) | [Bản Tiếng Việt](docs/RETROSPECTIVE.vi.md) • [Operations & DR Runbook (EN)](docs/OPERATIONS_RUNBOOK.md) | [Sổ tay Vận hành (VI)](docs/OPERATIONS_RUNBOOK.vi.md).*

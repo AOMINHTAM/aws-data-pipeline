@@ -8,21 +8,23 @@
 
 | Thuộc tính | Chi tiết |
 | :--- | :--- |
-| **Tên dự án** | **End-to-End Event-Driven AWS E-Commerce Data Pipeline & Kimball Star Schema Analytics (V4)** |
+| **Tên dự án** | **End-to-End Event-Driven AWS E-Commerce Data Pipeline & Kimball Star Schema Analytics (V5 — `5.0.0`)** |
 | **Kỹ sư thực hiện** | Ao Minh Tam ([@AOMINHTAM](https://github.com/AOMINHTAM)) |
 | **Repository** | [github.com/AOMINHTAM/aws-data-pipeline](https://github.com/AOMINHTAM/aws-data-pipeline) |
 | **Dataset sử dụng** | Olist Brazilian E-Commerce Dataset (~120MB, ~100k đơn hàng, 9 quan hệ) |
-| **Công nghệ cốt lõi** | AWS (S3, SQS, Redshift Serverless, IAM), dbt Core, Apache Airflow 3 (Astro CLI & Astronomer Cosmos), Docker, Python (`redshift-connector`, `pandas`), WSL2 Ubuntu |
-| **Lịch sử hoàn thành** | **V2 (Baseline):** 10/2026 • **V3 (S3 Sensor):** 12/11/2026 • **V4 Bước 1 (SQS) & Bước 2 (dbt Incremental):** 13/11/2026 |
-| **Trạng thái** | ✅ **HOÀN THÀNH TOÀN DIỆN (100% ACCEPTED & LIVE VERIFIED)** |
+| **Công nghệ cốt lõi** | AWS (CloudFormation, S3, SQS + DLQ, CloudWatch, SNS, Redshift Serverless, IAM), dbt Core, Apache Airflow 3 (Astro CLI & Astronomer Cosmos), Docker, Python (`redshift-connector`, `boto3`, `pandas`), WSL2 Ubuntu |
+| **Lịch sử hoàn thành** | **V2 (Baseline):** 10/2026 • **V3 (S3 Sensor):** 12/11/2026 • **V4 (`v4.0.1` Event-Driven & Incremental):** 13/11/2026 • **V5 (`5.0.0` CloudFormation IaC, DLQ & Observability):** 18/11/2026 |
+| **Trạng thái** | ✅ **HOÀN THÀNH TOÀN DIỆN & PHÁT HÀNH `5.0.0` (100% ACCEPTED & LIVE VERIFIED)** |
 
 ---
 
-## 🏗️ TIẾN HÓA KIẾN TRÚC HỆ THỐNG (V2 → V4)
+## 🏗️ TIẾN HÓA KIẾN TRÚC HỆ THỐNG (V2 → V5)
 
-| V2 (Manual Batch Baseline) | V4 (Pure Event-Driven & Incremental ELT) |
+| V2 (Manual Batch Baseline) | V5 (`5.0.0` — CloudFormation IaC, DLQ & Observability) |
 | :---: | :---: |
-| ![V2 Architecture](../images/architecture.png) | ![V4 Architecture](../images/architecture_v4.png) |
+| ![V2 Architecture](../images/architecture.png) | ![V5 Architecture](../images/architecture_v5.png) |
+
+> 📖 **Tài liệu V5 chuyên sâu:** [Giải thích chi tiết kiến trúc V5 (V5_DEEP_DIVE.vi.md)](V5_DEEP_DIVE.vi.md) • [Sổ tay Vận hành & DR (OPERATIONS_RUNBOOK.vi.md)](OPERATIONS_RUNBOOK.vi.md)
 
 ---
 
@@ -188,9 +190,9 @@ flowchart LR
 
 ---
 
-### BƯỚC 3 (NÂNG CẤP LÊN V5): Production CloudOps, AWS CloudFormation IaC, SQS DLQ & CloudWatch/SNS Alerting (Chuẩn FCJ) — `✅ LIVE VERIFIED TRÊN NHÁNH feat/v5-cloudformation-resilience`
+### BƯỚC 3 (NÂNG CẤP LÊN V5): Production CloudOps, AWS CloudFormation IaC, SQS DLQ & CloudWatch/SNS Alerting (Chuẩn FCJ) — `✅ ĐÃ MERGE MAIN & PHÁT HÀNH RELEASE 5.0.0 (LIVE VERIFIED)`
 
-Sau khi đóng mốc **`v4.0.1`** cho tầng **Data Engineering Core** (S3 → SQS → Airflow 3 `AssetWatcher` → Atomic Redshift Swap → dbt Incremental + GitHub Actions CI xanh 100%), dự án bước sang thế hệ **V5 (`v5.0.0`)** nhằm đáp ứng trọn vẹn tiêu chuẩn vận hành đám mây thực tế (**CloudOps, Reproducibility, Fault Tolerance & Disaster Recovery**) theo khung **AWS First Cloud Journey (FCJ)**.
+Sau khi đóng mốc **`v4.0.1`** cho tầng **Data Engineering Core** (S3 → SQS → Airflow 3 `AssetWatcher` → Atomic Redshift Swap → dbt Incremental + GitHub Actions CI xanh 100%), dự án đã hoàn tất nâng cấp và phát hành **`5.0.0`** (PR #4 tại commit `692050c`) cho thế hệ **V5** nhằm đáp ứng trọn vẹn tiêu chuẩn vận hành đám mây thực tế (**CloudOps, Reproducibility, Fault Tolerance & Disaster Recovery**) theo khung **AWS First Cloud Journey (FCJ)**. Xem phân tích kỹ thuật chi tiết từng thành phần tại [`docs/V5_DEEP_DIVE.vi.md`](V5_DEEP_DIVE.vi.md).
 
 #### 1. Bức tranh Tiến hóa Kiến trúc (V2 → V3 → V4 → V5)
 
