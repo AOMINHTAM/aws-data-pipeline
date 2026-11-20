@@ -69,42 +69,25 @@ Các file dữ liệu thành phẩm đã được trích xuất tại thư mục
 
 ---
 
-## 📝 XÁC NHẬN ĐÓNG DỰ ÁN V2, V3 & V4 BƯỚC 1 (SIGN-OFF)
+## 📝 XÁC NHẬN ĐÓNG DỰ ÁN V2 → V5 (PROJECT SIGN-OFF)
 
 - **Đánh giá tổng thể dự án:** ⭐⭐⭐⭐⭐ (5/5)
-- **Ngày nghiệm thu:** V2: 31/10/2026 • V3 (S3 Sensor): 12/11/2026 • V4 Step 1 (S3 → SQS → Airflow): 13/11/2026
+- **Ngày nghiệm thu:** V2: 31/10/2026 • V3 (S3 Sensor): 12/11/2026 • V4 (`v4.0.1` Event-Driven & Incremental): 13/11/2026 • V5 (`5.0.0` CloudFormation IaC, DLQ & Observability): 18/11/2026
 - **Kỹ sư thực hiện:** Ao Minh Tam ([@AOMINHTAM](https://github.com/AOMINHTAM))
 
 ---
 
-## 🚀 LỘ TRÌNH NÂNG CẤP V4 & BÀN GIAO CONTEXT SANG CONVERSATION MỚI (V4 ROADMAP & HANDOFF)
+## 🚀 LỘ TRÌNH NÂNG CẤP V4 → V5 & PHÂN TÍCH KỸ THUẬT CHUYÊN SÂU (V4 → V5 ROADMAP & TECHNICAL DEEP DIVE)
 
-> **Mục đích tài liệu này:** Ghi lại đầy đủ trạng thái hạ tầng hiện tại, lý do kiến trúc, cơ chế hoạt động bên dưới (under-the-hood) và giá trị kiến thức của 3 bước nâng cấp V4 để khi mở Conversation mới chỉ cần đọc file này là tiếp tục triển khai ngay không mất ngữ cảnh.
-
-### 0. Trạng thái Bàn giao Hiện tại (Current Workspace & Cloud State)
-* **Git Branch đang đứng:** `feat/v4-sqs-event-driven` (tách ra từ `main` tại commit `ffcdac2` sau khi đã hoàn tất và push V3).
-* **Tài khoản & Quyền AWS IAM:**
-  * IAM User: `arn:aws:iam::205506434601:user/de-ecommerce-dev` (Region: `us-east-1`).
-  * Đã gắn đủ 4 Managed Policies: `AmazonS3FullAccess`, `AmazonRedshiftFullAccess`, `IAMFullAccess`, và **`AmazonSQSFullAccess`** (vừa cấp thêm và đã verify `wsl aws sqs list-queues --region us-east-1` thành công).
-* **Trạng thái S3 (`olist-raw-data-amt-us-east-1-205506434601-us-east-1-an`):**
-  * Folder `raw/` hiện đang trống (`[]`).
-  * 9 file CSV gốc đang nằm trong `archive/20261112_165135/` (có thể copy ngược 1 hoặc vài file từ `archive/` về `raw/` trên S3 để test V4 mà không cần upload lại từ máy local).
-  * S3 Event Notification hiện đang trống (chưa cấu hình).
-* **Trạng thái Docker / Astro CLI:**
-  * Đang tắt (`astro dev stop`) để tiết kiệm RAM.
-  * File `.env` (git-ignored) đã cấu hình sẵn `DBT_REDSHIFT_PASSWORD`, `AWS_DEFAULT_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `S3_BUCKET_NAME`, `AIRFLOW_CONN_AWS_DEFAULT=aws://`.
-
----
-
-### Tại sao lại đi theo thứ tự: Bước 1 (SQS Push) → Bước 2 (dbt Incremental) → Bước 3 (Alerting)?
+### Tại sao lại đi theo thứ tự: Bước 1 (SQS Push) → Bước 2 (dbt Incremental) → Bước 3 (Observability & CloudOps)?
 Ba bước này có **quan hệ nhân quả chặt chẽ về mặt kiến trúc**:
 1. **Bước 1 (S3 → SQS → Airflow)** giải quyết bài toán **"Khi nào chạy và độ trễ bao lâu?"** — chuyển từ *Polling định kỳ 15 phút* sang *Push-based Event-Driven* (file vừa chạm S3 là bắn event vào hàng đợi SQS để xử lý ngay).
 2. **Bước 2 (dbt Incremental Modeling)** giải quyết bài toán **"Khi event nổ liên tục theo từng lô nhỏ (micro-batch), xử lý dữ liệu thế nào để không mất dữ liệu cũ và không đốt tiền Redshift?"** — khi đã chạy theo sự kiện thực tế, ta không thể `TRUNCATE` toàn bảng raw hay `CREATE TABLE AS` dựng lại toàn bộ bảng Fact hàng triệu dòng mỗi lần có 1 file mới được nữa, mà bắt buộc phải dùng cơ chế **Incremental (Upsert / Merge)**.
-3. **Bước 3 (Webhook Alerting)** là lớp giám sát ngoại vi (Observability) — không bắt buộc cho pet project nhưng làm thử một kịch bản gọn nhẹ ở cuối để nắm trọn vẹn luồng báo động tự động khi pipeline thành công/thất bại.
+3. **Bước 3 (Observability & CloudOps Alerting — mở rộng thành V5)** hoàn thiện lớp giám sát ngoại vi, cách ly gói tin lỗi (SQS DLQ), cảnh báo chủ động (CloudWatch + SNS) và chuẩn hóa hạ tầng bằng CloudFormation IaC cho môi trường production.
 
 ---
 
-### BƯỚC 1: Pure Event-Driven Ingestion với AWS S3 Event Notification & AWS SQS
+### BƯỚC 1: Pure Event-Driven Ingestion với AWS S3 Event Notification & AWS SQS — `✅ ĐÃ HOÀN THÀNH`
 
 ```mermaid
 flowchart LR
@@ -113,14 +96,14 @@ flowchart LR
     C -->|"SqsSensor / SqsHook\n(Đọc JSON & lấy tên file)"| D["Airflow DAG V4\n(load -> dbt -> archive -> xóa msg)"]
 ```
 
-#### 1. Cái gì chuẩn bị làm (What to build)
-1. Tạo Standard Queue trên AWS SQS: `olist-s3-raw-arrival-queue` (Region `us-east-1`, chi phí \$0 vì Free Tier miễn phí 1 triệu requests/tháng).
-2. Gắn **Resource-based Queue Policy** cho phép dịch vụ `s3.amazonaws.com` thực hiện quyền `sqs:SendMessage` từ đúng ARN của bucket `olist-raw-data-amt-us-east-1-205506434601-us-east-1-an`.
-3. Bật **S3 Bucket Notification Configuration**: Lắng nghe sự kiện `s3:ObjectCreated:*` với bộ lọc `prefix = raw/` và `suffix = .csv` để đẩy message thẳng vào SQS.
-4. Nâng cấp `dags/ecommerce_pipeline_dag.py` lên **Airflow 3 `Asset` + `AssetWatcher` (`SqsSensorTrigger` Long Polling 20s)** bỏ hoàn toàn lịch cron `*/5`, nạp Redshift qua **bảng tạm `TEMP TABLE` + transaction `DELETE/INSERT` (`autocommit=False`)**, thêm DAG bảo trì [`dags/ecommerce_weekly_full_refresh_dag.py`](../dags/ecommerce_weekly_full_refresh_dag.py) mặc định **Paused** để đảm bảo \$0 chi phí khi không chạy, và chuẩn hóa module `include/sqs_parser.py` + `tests/test_sqs_parser.py` (**7/7 tests PASS**).
+#### 1. Những gì đã triển khai (What Was Built)
+1. Đã tạo Standard Queue trên AWS SQS: `olist-s3-raw-arrival-queue` (Region `us-east-1`, chi phí \$0 vì Free Tier miễn phí 1 triệu requests/tháng).
+2. Đã gắn **Resource-based Queue Policy** cho phép dịch vụ `s3.amazonaws.com` thực hiện quyền `sqs:SendMessage` từ đúng ARN của bucket nguồn (kèm điều kiện `aws:SourceArn` và `aws:SourceAccount`).
+3. Đã bật **S3 Bucket Notification Configuration**: Lắng nghe sự kiện `s3:ObjectCreated:*` với bộ lọc `prefix = raw/` và `suffix = .csv` để đẩy message thẳng vào SQS.
+4. Đã nâng cấp [`dags/ecommerce_pipeline_dag.py`](../dags/ecommerce_pipeline_dag.py) lên **Airflow 3 `Asset` + `AssetWatcher` (`SqsSensorTrigger` Long Polling 20s)** bỏ hoàn toàn lịch cron `*/5`, nạp Redshift qua **bảng tạm `TEMP TABLE` + transaction `DELETE/INSERT` (`autocommit=False`)**, thêm DAG bảo trì [`dags/ecommerce_weekly_full_refresh_dag.py`](../dags/ecommerce_weekly_full_refresh_dag.py) mặc định **Paused** để đảm bảo \$0 chi phí khi không chạy, và chuẩn hóa module [`include/sqs_parser.py`](../include/sqs_parser.py) + [`tests/test_sqs_parser.py`](../tests/test_sqs_parser.py) (**7/7 tests PASS** tại mốc V4, sau mở rộng lên **21/21 unit tests** ở V5).
 
 #### 2. Mục đích — Vì sao phải làm (Why)
-* **Event-Driven thực thụ không ràng buộc Cron (`Zero Time Cron`):** Loại bỏ lịch chạy rỗng mỗi 5 phút (`SKIPPED` clutter). Triggerer lắng nghe SQS bằng AWS Long Polling (`wait_time_seconds=20`, ~104k requests/tháng nếu chạy liên tục — nằm gọn trong Free Tier 1 triệu requests/tháng, không tốn compute RPU nhàn rỗi; lưu ý chi phí lưu trữ S3/Redshift Managed Storage tính riêng), và ngừng hẳn polling khi bạn chạy `astro dev stop`.
+* **Event-Driven thực thụ không ràng buộc Cron (`Zero Time Cron`):** Loại bỏ lịch chạy rỗng mỗi 5 phút (`SKIPPED` clutter). Triggerer lắng nghe SQS bằng AWS Long Polling (`wait_time_seconds=20`, ~104k requests/tháng nếu chạy liên tục — nằm gọn trong Free Tier 1 triệu requests/tháng, không tốn compute RPU nhàn rỗi; lưu ý chi phí lưu trữ S3/Redshift Managed Storage tính riêng), và ngừng hẳn polling khi dừng local Airflow qua `astro dev stop`.
 * **Nạp Redshift an toàn giao dịch + Empty-Stage Guard:** Trong Redshift, `TRUNCATE` tự commit ngay lập tức và **không thể `ROLLBACK`** nếu `COPY` lỗi; vì vậy bản nâng cấp stage vào `TEMP TABLE` trước, kiểm tra `staged_rows > 0` qua [`include/ingestion_guards.py`](../include/ingestion_guards.py) rồi mới chạy `DELETE + INSERT` trong transaction `autocommit=False` cho từng bảng *(atomicity đảm bảo ở cấp từng bảng đích)*.
 * **Không cần quét (List) toàn bộ S3:** Lệnh `LIST` trên S3 khi bucket có hàng trăm ngàn object rất chậm và tốn phí API. Trong khi đó, message trong SQS chứa sẵn tên file vừa tạo (`Records[0].s3.object.key`), Airflow biết chính xác cần nạp file nào mà không cần quét thư mục.
 * **Chống mất mát sự kiện (Buffering & Decoupling):** Nếu Airflow container đang bảo trì hoặc tắt, các sự kiện upload file lên S3 vẫn nằm an toàn trong hàng đợi SQS (lưu giữ tới 4–14 ngày). Khi Airflow bật lại, nó đọc hàng đợi và xử lý bù không sót một file nào!
