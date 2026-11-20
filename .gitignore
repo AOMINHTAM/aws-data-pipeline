@@ -30,6 +30,9 @@ exports/
 # Local-only notes & interview guides (never push to GitHub)
 *.local.md
 docs/*.local.md
+images/architecture_v5_1.*
+images/notebook_*.drawio
+images/notebook_*.png
 
 # OS & IDE
 .DS_Store
