@@ -69,21 +69,21 @@ Extracted analytical datasets stored locally in [`exports/`](../exports/) (git-i
 
 ---
 
-## 📝 PROJECT SIGN-OFF (V2, V3 & V4 STEP 1)
+## 📝 PROJECT SIGN-OFF (V2 → V5)
 
 - **Overall Assessment:** ⭐⭐⭐⭐⭐ (5/5)
-- **Sign-Off Dates:** V2: Oct 31, 2026 • V3 (S3 Sensor): Nov 12, 2026 • V4 Step 1 (S3 → SQS → Airflow): Nov 13, 2026
+- **Sign-Off Dates:** V2: Oct 31, 2026 • V3 (S3 Sensor): Nov 12, 2026 • V4 (`v4.0.1` Event-Driven & Incremental): Nov 13, 2026 • V5 (`5.0.0` CloudFormation IaC, DLQ & Observability): Nov 18, 2026
 - **Project Engineer:** Ao Minh Tam ([@AOMINHTAM](https://github.com/AOMINHTAM))
 
 ---
 
-## 🚀 V4 UPGRADE ROADMAP & TECHNICAL DEEP DIVE
+## 🚀 V4 → V5 UPGRADE ROADMAP & TECHNICAL DEEP DIVE
 
-### Why Sequence V4 as: Step 1 (SQS Push) → Step 2 (dbt Incremental) → Step 3 (Alerting)?
+### Why Sequence as: Step 1 (SQS Push) → Step 2 (dbt Incremental) → Step 3 (Observability & CloudOps)?
 These three steps follow a **strict architectural causality chain**:
 1. **Step 1 (S3 → SQS → Airflow)** solves **"When to run and with what latency?"** — moving from 15-minute polling to push-based event queuing.
 2. **Step 2 (dbt Incremental Modeling)** solves **"How do we process continuous micro-batch events without wiping historical data or burning Redshift credits?"** — once triggered by individual file arrivals, full `TRUNCATE` / `CREATE TABLE AS` rebuilds become inefficient, requiring **Incremental Upsert / Merge**.
-3. **Step 3 (Webhook Alerting)** adds lightweight external observability for automated `SUCCESS` / `FAILED` notifications.
+3. **Step 3 (Observability & CloudOps — expanded into V5)** establishes proactive monitoring, poison-message isolation (SQS DLQ), automated alerting (CloudWatch + SNS), and reproducible CloudFormation IaC for production reliability.
 
 ---
 

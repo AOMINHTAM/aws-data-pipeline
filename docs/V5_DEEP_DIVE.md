@@ -57,7 +57,7 @@ All four alarms set `TreatMissingData: notBreaching` and publish both `AlarmActi
 ## 3. Application Reliability: Airflow 3 Bugfix, Audit Ledger & Safe ACK
 
 ### 3.1. Real Airflow 3 Task SDK Bug Caught Live
-During live Bước 5 testing on Airflow 3.3, `extract_messages_from_asset_events` initially returned `[]` and skipped the run even though `SqsSensorTrigger` emitted a valid `TriggerEvent`:
+During live V5 testing on Airflow 3.3, `extract_messages_from_asset_events` initially returned `[]` and skipped the run even though `SqsSensorTrigger` emitted a valid `TriggerEvent`:
 - **Root Cause:** In Airflow 3 Task SDK, `context["triggering_asset_events"]` is a `TriggeringAssetEventsAccessor` (subclass of `collections.abc.Mapping`, **not `dict`**), so `isinstance(..., dict)` returned `False`.
 - **Fix:** Updated [`include/sqs_parser.py`](../include/sqs_parser.py) to check `collections.abc.Mapping` and added dedicated unit tests in [`tests/test_sqs_parser.py`](../tests/test_sqs_parser.py) and [`tests/test_ingestion_guards.py`](../tests/test_ingestion_guards.py) (**21/21 unit tests passing**).
 

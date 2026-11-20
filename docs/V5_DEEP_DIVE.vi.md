@@ -63,7 +63,7 @@ Ngoài ra, **`PipelineAlertTopicPolicy`** (`AWS::SNS::TopicPolicy`) giới hạn
 ## 3. Độ tin cậy Ứng dụng: Bug Airflow 3, Audit Ledger & Safe ACK
 
 ### 3.1. Bug thực tế của Airflow 3 Task SDK đã bắt & vá khi test live
-Khi kiểm thử live Bước 5 trên **Airflow 3.3**, hàm `extract_messages_from_asset_events` ban đầu trả về `[]` khiến task bị skip dù `SqsSensorTrigger` đã phát `TriggerEvent` chứa đủ `message_batch`.
+Khi kiểm thử live V5 trên **Airflow 3.3**, hàm `extract_messages_from_asset_events` ban đầu trả về `[]` khiến task bị skip dù `SqsSensorTrigger` đã phát `TriggerEvent` chứa đủ `message_batch`.
 - **Nguyên nhân gốc:** Trong Airflow 3 Task SDK, `context["triggering_asset_events"]` là một object **`TriggeringAssetEventsAccessor`**, kế thừa từ `collections.abc.Mapping` chứ **không phải `dict`**. Kiểm tra `isinstance(..., dict)` luôn trả về `False`!
 - **Cách khắc phục:** Chuyển sang `isinstance(..., Mapping)` trong [`include/sqs_parser.py`](../include/sqs_parser.py) và bổ sung bộ unit test trong [`tests/test_sqs_parser.py`](../tests/test_sqs_parser.py) & [`tests/test_ingestion_guards.py`](../tests/test_ingestion_guards.py) (**21/21 unit tests PASS**).
 
