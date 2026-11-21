@@ -19,6 +19,22 @@ Upgraded from the **V4 (`v4.0.1`)** Event-Driven Data Core into **V5 Production 
 
 ---
 
+## 🎯 Business Problems Solved & Analytical Use Cases
+
+Raw Olist marketplace feeds arrive across **9 fragmented CSVs** with Portuguese category names, split/installment payments, and a new `customer_id` generated per order (masking repeat buyers). This pipeline turns those operational dumps into a governed **Kimball Star Schema** (`public_marts`) and **4 BI-ready datasets** answering core e-commerce questions:
+
+| Stakeholder | Business Problem Solved | How the Pipeline Resolves It |
+| :--- | :--- | :--- |
+| **Finance & Sales** | Reconciling merchandise value, shipping fees, invoice totals, and installment-adjusted cash collected | [`fct_orders.sql`](dbt/models/marts/fct_orders.sql) separates `total_item_value`, `total_freight_value`, `total_order_cost`, and `total_payment_value`, ranking `primary_payment_type` by **highest payment value** alongside `max_installments`. |
+| **CRM & Marketing** | Measuring true unique buyers, repeat-purchase rate, and accurate Customer Lifetime Value (LTV) | [`dim_customers.sql`](dbt/models/marts/dim_customers.sql) aggregates full order/payment history at **`customer_unique_id` grain** (`first_order_date`, `most_recent_order_date`, `total_orders`, `lifetime_spend`) and segments `One-Time Customer` vs. `Returning Customer` — preserved across incremental runs. |
+| **Operations & Logistics** | Tracking Delivery SLA compliance across states/cities and quantifying delay impact on ratings | [`fct_orders.sql`](dbt/models/marts/fct_orders.sql) computes `delivery_duration_days`, `estimated_delivery_duration_days`, `delay_days`, `is_delayed`, and standardized `delivery_status` (`On Time`, `Delayed`, `Pending Delivery`) linked to `review_score`. |
+| **Merchandising** | Reporting sales and shipping weight in standardized English product categories | [`stg_products.sql`](dbt/models/staging/stg_products.sql) fixes raw schema typos (`_lenght` → `_length`) and [`dim_products.sql`](dbt/models/marts/dim_products.sql) translates `category_name` with physical dimensions/weight. |
+| **Governance & FinOps** | Delivering fresh metrics without risking wiped dashboards or idle cloud spend | Event-driven ingestion updates Redshift on arrival, `ensure_non_empty_stage` + `validate_csv_header` block corrupt loads, `ops.pipeline_ingestion_audit` tracks lineage, and decoupled `exports/` CSVs power Power BI at `$0` idle RPU. |
+
+> 📖 **Full Business & Analytics Breakdown:** [`docs/BUSINESS_CASE.md`](docs/BUSINESS_CASE.md) | [`Bản Tiếng Việt`](docs/BUSINESS_CASE.vi.md)
+
+---
+
 ## 🏛️ System Architecture: V4 Data Core vs. V5 CloudOps & Resilience
 
 <table width="100%">
@@ -169,6 +185,8 @@ aws_data_pipeline/
 │   ├── ingestion_guards.py                   # Empty-stage guard, deterministic archive key, and Safe ACK verifier
 │   └── sqs_parser.py                         # SQS S3 Event JSON parser, Mapping accessor extractor & deduplicator
 ├── docs/
+│   ├── BUSINESS_CASE.md                      # Business problems solved, stakeholder KPIs & BI consumption contract (EN)
+│   ├── BUSINESS_CASE.vi.md                   # Business problems solved, stakeholder KPIs & BI consumption contract (VI)
 │   ├── V5_DEEP_DIVE.md                       # Detailed V5 CloudFormation, Fault-Tolerance, Observability & FinOps Deep Dive (EN)
 │   ├── V5_DEEP_DIVE.vi.md                    # Detailed V5 CloudFormation, Fault-Tolerance, Observability & FinOps Deep Dive (VI)
 │   ├── OPERATIONS_RUNBOOK.md                 # V5 Operations, Rollback, DLQ Redrive, DR & Clean-up Runbook (EN)
@@ -251,4 +269,4 @@ make cfn-status
 * **Ao Minh Tâm** - [GitHub](https://github.com/AOMINHTAM) | [Portfolio Case Study](https://aominhtam-portfolio.vercel.app/projects/aws-data-pipeline.html)
 * Project: *AWS E-Commerce Data Pipeline V5 (CloudFormation IaC, Fault-Tolerant Event-Driven ELT & CloudOps)*
 
-> 📖 *Read more: [V5 Deep Dive (EN)](docs/V5_DEEP_DIVE.md) | [Giải thích chi tiết V5 (VI)](docs/V5_DEEP_DIVE.vi.md) • [Project Retrospective (EN)](docs/RETROSPECTIVE.md) | [Bản Tiếng Việt](docs/RETROSPECTIVE.vi.md) • [Operations & DR Runbook (EN)](docs/OPERATIONS_RUNBOOK.md) | [Sổ tay Vận hành (VI)](docs/OPERATIONS_RUNBOOK.vi.md).*
+> 📖 *Read more: [Business Case (EN)](docs/BUSINESS_CASE.md) | [Bài toán Business (VI)](docs/BUSINESS_CASE.vi.md) • [V5 Deep Dive (EN)](docs/V5_DEEP_DIVE.md) | [Giải thích chi tiết V5 (VI)](docs/V5_DEEP_DIVE.vi.md) • [Project Retrospective (EN)](docs/RETROSPECTIVE.md) | [Bản Tiếng Việt](docs/RETROSPECTIVE.vi.md) • [Operations & DR Runbook (EN)](docs/OPERATIONS_RUNBOOK.md) | [Sổ tay Vận hành (VI)](docs/OPERATIONS_RUNBOOK.vi.md).*
