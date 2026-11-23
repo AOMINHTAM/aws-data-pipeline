@@ -6,7 +6,7 @@
         <mxCell id="1" parent="0" />
 
         <!-- 1. APACHE AIRFLOW 3 -->
-        <mxCell id="airflow_zone" value="APACHE AIRFLOW 3 (Astro CLI &amp; Docker)  •  Event-Driven Orchestration&#10;Schedule: [sqs_raw_arrival_asset] (Zero Cron)  |  catchup=False  |  max_active_runs=1  |  Weekly Full-Refresh (Paused)" style="rounded=1;arcSize=10;whiteSpace=wrap;html=1;sketch=1;curveFitting=1;jiggle=2;strokeWidth=2;strokeColor=#1565C0;fillColor=#E3F2FD;fontColor=#0D47A1;verticalAlign=top;spacingTop=12;align=center;fontFamily=Comic Sans MS;fontSize=16;fontStyle=1;" vertex="1" parent="1">
+        <mxCell id="airflow_zone" value="APACHE AIRFLOW 3 (Astro CLI &amp; Docker)  •  Event-Driven Orchestration&#10;Schedule: [sqs_raw_arrival_asset] (Event-Triggered)  |  catchup=False  |  max_active_runs=1  |  Weekly Full-Refresh (Paused)" style="rounded=1;arcSize=10;whiteSpace=wrap;html=1;sketch=1;curveFitting=1;jiggle=2;strokeWidth=2;strokeColor=#1565C0;fillColor=#E3F2FD;fontColor=#0D47A1;verticalAlign=top;spacingTop=12;align=center;fontFamily=Comic Sans MS;fontSize=16;fontStyle=1;" vertex="1" parent="1">
           <mxGeometry x="860" y="95" width="1580" height="230" as="geometry" />
         </mxCell>
 
@@ -46,13 +46,13 @@
         </mxCell>
 
         <!-- 4. AMAZON REDSHIFT SERVERLESS -->
-        <mxCell id="redshift_zone" value="AMAZON REDSHIFT SERVERLESS (4 RPUs  •  CLOUD DATA WAREHOUSE)&#10;AWS Budgets ($5/mo)  |  VPC Security Group (5439)  |  Zero Idle RPU  |  Recovery Points &amp; Snapshots" style="rounded=1;arcSize=10;whiteSpace=wrap;html=1;sketch=1;curveFitting=1;jiggle=2;strokeWidth=2;strokeColor=#1565C0;fillColor=#E3F2FD;fontColor=#0D47A1;verticalAlign=top;spacingTop=12;align=center;fontFamily=Comic Sans MS;fontSize=16;fontStyle=1;" vertex="1" parent="1">
+        <mxCell id="redshift_zone" value="AMAZON REDSHIFT SERVERLESS (4 RPUs  •  CLOUD DATA WAREHOUSE)&#10;AWS Budgets ($5/mo)  |  VPC Security Group (5439)  |  On-Demand Compute  |  Recovery Points &amp; Snapshots" style="rounded=1;arcSize=10;whiteSpace=wrap;html=1;sketch=1;curveFitting=1;jiggle=2;strokeWidth=2;strokeColor=#1565C0;fillColor=#E3F2FD;fontColor=#0D47A1;verticalAlign=top;spacingTop=12;align=center;fontFamily=Comic Sans MS;fontSize=16;fontStyle=1;" vertex="1" parent="1">
           <mxGeometry x="860" y="435" width="1220" height="520" as="geometry" />
         </mxCell>
         <mxCell id="rs_raw" value="RAW LAYER (Bronze)&#10;raw_data (9 Tables)&#10;Temp Stage -&gt; DELETE + INSERT&#10;+ ops.pipeline_ingestion_audit" style="rounded=1;arcSize=10;whiteSpace=wrap;html=1;sketch=1;curveFitting=1;jiggle=2;strokeWidth=2;strokeColor=#1565C0;fillColor=#FFFFFF;fontColor=#0D47A1;verticalAlign=middle;align=center;fontFamily=Comic Sans MS;fontSize=14;fontStyle=1;" vertex="1" parent="1">
           <mxGeometry x="895" y="555" width="340" height="190" as="geometry" />
         </mxCell>
-        <mxCell id="rs_stg" value="STAGING LAYER (Silver)&#10;public_staging (7 Views)&#10;Type-safe casting &amp; column cleanup&#10;Zero extra storage cost" style="rounded=1;arcSize=10;whiteSpace=wrap;html=1;sketch=1;curveFitting=1;jiggle=2;strokeWidth=2;strokeColor=#E65100;fillColor=#FFF3E0;fontColor=#E65100;verticalAlign=middle;align=center;fontFamily=Comic Sans MS;fontSize=14;fontStyle=1;" vertex="1" parent="1">
+        <mxCell id="rs_stg" value="STAGING LAYER (Silver)&#10;public_staging (7 Views)&#10;Type-safe casting &amp; column cleanup&#10;Logical views (no materialized storage)" style="rounded=1;arcSize=10;whiteSpace=wrap;html=1;sketch=1;curveFitting=1;jiggle=2;strokeWidth=2;strokeColor=#E65100;fillColor=#FFF3E0;fontColor=#E65100;verticalAlign=middle;align=center;fontFamily=Comic Sans MS;fontSize=14;fontStyle=1;" vertex="1" parent="1">
           <mxGeometry x="1290" y="555" width="310" height="190" as="geometry" />
         </mxCell>
         <mxCell id="rs_marts" value="MARTS LAYER (Gold • Star Schema)&#10;public_marts (Incremental delete+insert)&#10;fct_orders (4-Source Incremental)&#10;dim_customers (Customer LTV)&#10;dim_products (EN Categories)" style="rounded=1;arcSize=10;whiteSpace=wrap;html=1;sketch=1;curveFitting=1;jiggle=2;strokeWidth=2;strokeColor=#1565C0;fillColor=#FFFFFF;fontColor=#0D47A1;verticalAlign=middle;align=center;fontFamily=Comic Sans MS;fontSize=14;fontStyle=1;" vertex="1" parent="1">
@@ -68,7 +68,7 @@
         </mxCell>
 
         <!-- 6. BOTTOM BANNER: AWS CLOUDFORMATION IaC -->
-        <mxCell id="cfn_banner" value="AWS CloudFormation IaC (infra/cloudformation/template.yaml)&#10;• Declarative Stack: S3 (Versioning &amp; Lifecycle), SQS + DLQ, Least-Privilege IAM, 4 CloudWatch Alarms + SNS, Optional Redshift &amp; Budget&#10;• CloudOps &amp; CI: Native Auto-Rollback  |  1-Command Clean-up (make cfn-delete)  |  GitHub Actions CI (Ruff, cfn-lint, pytest, dbt parse)" style="rounded=1;arcSize=10;whiteSpace=wrap;html=1;sketch=1;curveFitting=1;jiggle=2;strokeWidth=2;strokeColor=#C62828;fillColor=#FFEBEE;fontColor=#B71C1C;verticalAlign=middle;align=center;fontFamily=Comic Sans MS;fontSize=15;fontStyle=1;" vertex="1" parent="1">
+        <mxCell id="cfn_banner" value="AWS CloudFormation IaC (infra/cloudformation/template.yaml)&#10;• Resources: S3 (Versioning &amp; Lifecycle), SQS + DLQ, Least-Privilege IAM, 4 CloudWatch Alarms + SNS, Optional Redshift &amp; Budget&#10;• Operations: Native Auto-Rollback, Stack Clean-up (make cfn-delete), GitHub Actions CI (Ruff, cfn-lint, pytest, dbt parse)" style="rounded=1;arcSize=10;whiteSpace=wrap;html=1;sketch=1;curveFitting=1;jiggle=2;strokeWidth=2;strokeColor=#C62828;fillColor=#FFEBEE;fontColor=#B71C1C;verticalAlign=middle;align=center;fontFamily=Comic Sans MS;fontSize=15;fontStyle=1;" vertex="1" parent="1">
           <mxGeometry x="40" y="1010" width="2400" height="150" as="geometry" />
         </mxCell>
 
