@@ -3,7 +3,9 @@
         materialized='incremental',
         unique_key='customer_id',
         incremental_strategy='delete+insert',
-        on_schema_change='sync_all_columns'
+        on_schema_change='sync_all_columns',
+        dist='customer_id',
+        sort=['customer_unique_id', 'most_recent_order_date']
     )
 }}
 
@@ -47,20 +49,22 @@ affected_customers as (
     from customers c
     inner join orders o
         on c.customer_id = o.customer_id
-    where o.order_purchase_timestamp >= (
-        select dateadd(day, -3, coalesce(max(most_recent_order_date), cast('2016-01-01' as timestamp)))
-        from {{ this }}
-    )
+    where
+        o.order_purchase_timestamp >= (
+            select dateadd(day, -3, coalesce(max(tgt.most_recent_order_date), cast('2016-01-01' as timestamp)))
+            from {{ this }} tgt
+        )
 
     union
 
     select distinct c.customer_unique_id
     from customers c
-    where not exists (
-        select 1
-        from {{ this }} target
-        where target.customer_id = c.customer_id
-    )
+    where
+        not exists (
+            select 1
+            from {{ this }} target
+            where target.customer_id = c.customer_id
+        )
 
     union
 
@@ -70,11 +74,12 @@ affected_customers as (
         on c.customer_id = target.customer_id
     left join current_customer_metrics cm
         on c.customer_unique_id = cm.customer_unique_id
-    where coalesce(cm.lifetime_spend, 0) <> coalesce(target.lifetime_spend, 0)
-       or coalesce(cm.total_orders, 0) <> coalesce(target.total_orders, 0)
-       or coalesce(c.city, '') <> coalesce(target.city, '')
-       or coalesce(c.state, '') <> coalesce(target.state, '')
-       or coalesce(c.zip_code, '') <> coalesce(target.zip_code, '')
+    where
+        coalesce(cm.lifetime_spend, 0) <> coalesce(target.lifetime_spend, 0)
+        or coalesce(cm.total_orders, 0) <> coalesce(target.total_orders, 0)
+        or coalesce(c.city, '') <> coalesce(target.city, '')
+        or coalesce(c.state, '') <> coalesce(target.state, '')
+        or coalesce(c.zip_code, '') <> coalesce(target.zip_code, '')
 ),
 
 -- 2. Lấy toàn bộ các customer_id gắn với những customer_unique_id bị ảnh hưởng (cả cũ lẫn mới)

@@ -29,6 +29,9 @@ verify:
 	@if command -v cfn-lint >/dev/null 2>&1; then \
 		cfn-lint $(CFN_TEMPLATE); \
 	fi
+	@if command -v sqlfluff >/dev/null 2>&1; then \
+		sqlfluff lint dbt/models/; \
+	fi
 	@if [ -x "./venv/bin/dbt" ]; then \
 		DBT_REDSHIFT_PASSWORD=local_verify_dummy ./venv/bin/dbt parse --project-dir dbt --profiles-dir dbt; \
 	elif command -v dbt >/dev/null 2>&1; then \

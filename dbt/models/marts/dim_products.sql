@@ -1,3 +1,11 @@
+{{
+    config(
+        materialized='table',
+        dist='all',
+        sort=['category_name', 'product_id']
+    )
+}}
+
 with products as (
     select * from {{ ref('stg_products') }}
 ),

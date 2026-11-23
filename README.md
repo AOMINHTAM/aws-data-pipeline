@@ -4,12 +4,12 @@
 [![dbt](https://img.shields.io/badge/dbt-Core%20v1.8+-FF694B?logo=dbt&logoColor=white)](https://www.getdbt.com/)
 [![Apache Airflow](https://img.shields.io/badge/Airflow%203-Astro%20CLI%20%7C%20Cosmos-017CEE?logo=apache-airflow&logoColor=white)](https://airflow.apache.org/)
 [![Docker](https://img.shields.io/badge/Docker-Containerized-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
-[![CI](https://img.shields.io/badge/CI-Ruff%20%7C%20cfn--lint%20%7C%20UnitTests%20%7C%20dbt%20%7C%20Astro-2EA44F?logo=githubactions&logoColor=white)](.github/workflows/ci.yml)
+[![CI](https://img.shields.io/badge/CI-Ruff%20%7C%20cfn--lint%20%7C%20SQLFluff%20%7C%20UnitTests%20%7C%20dbt%20%7C%20Astro-2EA44F?logo=githubactions&logoColor=white)](.github/workflows/ci.yml)
 
 An **event-driven, fault-tolerant ELT Data Pipeline** built as a personal Cloud Engineering project on **AWS** using **Infrastructure as Code (AWS CloudFormation)**, **Amazon S3 (Versioned Data Lake)**, **Amazon SQS + Dead-Letter Queue (DLQ)**, **Amazon CloudWatch (4 Alarms) + Amazon SNS**, **Amazon Redshift Serverless**, **dbt Core**, and **Apache Airflow 3 (Astro CLI & Astronomer Cosmos)**.
 
-> 🌐 **Portfolio Case Study & Diagrams:** [View V5.0.1 Case Study on Portfolio →](https://aominhtam-portfolio.vercel.app/projects/aws-data-pipeline.html)  
-> 📌 **Verification Boundary (`5.0.0` vs. `5.0.1`):** Tag **`5.0.0`** passed full live E2E AWS verification (`17/17` tasks, `11` dbt schema tests on Redshift, empty-CSV DLQ → CloudWatch → SNS → Redrive). Tag **`5.0.1`** hardened 13 cross-review edge cases and is verified by `21/21` Python unit tests, `3` DAG pytests, `cfn-lint`, and offline `dbt parse` in GitHub Actions CI (pending next live stack rerun).
+> 🌐 **Portfolio Case Study & Diagrams:** [View V5 Case Study on Portfolio →](https://aominhtam-portfolio.vercel.app/projects/aws-data-pipeline.html)  
+> 📌 **Verification Boundary (`5.0.0` vs. `5.0.1` / `5.0.2`):** Tag **`5.0.0`** passed full live E2E AWS verification (`17/17` tasks, `11` dbt schema tests on Redshift, empty-CSV DLQ → CloudWatch → SNS → Redrive). Tags **`5.0.1`** (13 cross-review edge cases) and **`5.0.2`** (Redshift `DISTKEY`/`SORTKEY` physical design, `SQLFluff` SQL linting, S3 `VersionId`-pinned archive copy & `sequencer` event ordering) are verified by `23/23` Python unit tests, `3` DAG pytests, `Ruff`, `cfn-lint`, `SQLFluff`, and offline `dbt parse` in GitHub Actions CI (pending next live stack rerun).
 
 Upgraded from the **V4 (`v4.0.1`)** Event-Driven Data Core into **V5 Production CloudOps (AWS First Cloud Journey Standard)**:
 * **100% Reproducible CloudFormation IaC ([`infra/cloudformation/template.yaml`](infra/cloudformation/template.yaml)):** Provisions 15 core resources (and 4 conditional FinOps/Redshift resources) with **Native Stack Auto-Rollback**, `cfn-lint` CI validation, and 1-command versioned bucket clean-up (`make cfn-delete`).
@@ -141,24 +141,24 @@ Dependency lineage from 9 `raw_data` sources through 7 `public_staging` views in
 * **Disaster Recovery & Clean-up Runbook:** Bilingual [`docs/OPERATIONS_RUNBOOK.md`](docs/OPERATIONS_RUNBOOK.md) | [`Tiếng Việt`](docs/OPERATIONS_RUNBOOK.vi.md) covers Change Sets, Stack Rollback, DLQ Redrive, Redshift Serverless Recovery Points/Snapshots, S3 Event Replay, `ops.pipeline_ingestion_audit` queries, and 1-command `make cfn-delete` (powered by [`scripts/empty_versioned_bucket.py`](scripts/empty_versioned_bucket.py)).
 
 ### 2. Event-Driven Ingestion, Audit Ledger & Safe ACK
-* **Airflow 3 `AssetWatcher` (`Mapping` Support):** [`include/sqs_parser.py`](include/sqs_parser.py) supports both `dict` and Airflow 3 `TriggeringAssetEventsAccessor` (`collections.abc.Mapping`), verified by `21/21` Python unit tests in [`tests/`](tests/).
+* **Airflow 3 `AssetWatcher` (`Mapping` Support & `sequencer` Ordering):** [`include/sqs_parser.py`](include/sqs_parser.py) supports both `dict` and Airflow 3 `TriggeringAssetEventsAccessor` (`collections.abc.Mapping`), enforces S3 hex `sequencer` ordering when coalescing out-of-order SQS Standard deliveries for the same key, and is verified by `23/23` Python unit tests in [`tests/`](tests/).
 * **Two-Phase Batch Staging (DB Atomicity vs. Cross-System Orchestration):** Validates CSV headers (`validate_csv_header`), stages all batch CSVs into Redshift `TEMP TABLE`s, enforces [`ensure_non_empty_stage`](include/ingestion_guards.py) (`staged_rows > 0`), and executes `DELETE + INSERT` + `SWAPPED` audit logging inside the same explicit `autocommit=False` Redshift transaction (DB-level atomicity—*not* a distributed 2PC transaction across S3/SQS).
-* **At-Least-Once Delivery, Audit Ledger & Deterministic Safe ACK:** SQS enforces **at-least-once** delivery (not strict exactly-once transport). [`dags/ecommerce_pipeline_dag.py`](dags/ecommerce_pipeline_dag.py) refreshes `VisibilityTimeout=900s` (fail-closed prior to S3 modifications), writes cross-run deterministic `archive/<audit_id>/<filename>`, logs `SWAPPED` → `ARCHIVED` → `COMPLETED` (or `FAILED`), defers multi-record SQS ACKs until batch completion, and enforces [`verify_safe_to_ack_when_raw_missing`](include/ingestion_guards.py) in both Task 1 and Task 3 so duplicate redeliveries remain idempotent and a missing `raw/` object never causes a blind SQS ACK.
+* **At-Least-Once Delivery, Version-Pinned Archive & Deterministic Safe ACK:** SQS enforces **at-least-once** delivery (not strict exactly-once transport). [`dags/ecommerce_pipeline_dag.py`](dags/ecommerce_pipeline_dag.py) refreshes `VisibilityTimeout=900s` (fail-closed prior to S3 modifications), copies the exact S3 object `VersionId` via [`build_s3_copy_source`](include/ingestion_guards.py) into cross-run deterministic `archive/<audit_id>/<filename>`, logs `SWAPPED` → `ARCHIVED` → `COMPLETED` (or `FAILED`), defers multi-record SQS ACKs until batch completion, and enforces [`verify_safe_to_ack_when_raw_missing`](include/ingestion_guards.py) in both Task 1 and Task 3 so duplicate redeliveries remain idempotent and a missing `raw/` object never causes a blind SQS ACK.
 * **Testing & CI Separation (Verified vs. Declared Scope):**
-  * *GitHub Actions CI (executed on every push/PR to `main`):* Ruff lint, `cfn-lint`, `21/21` Python unit tests (`test_ingestion_guards.py` + `test_sqs_parser.py`), offline `dbt parse` (`$0` AWS cost, structural SQL/YAML validation), and Astro Docker build + `3` DAG pytests.
+  * *GitHub Actions CI (executed on every push/PR to `main`):* Ruff lint, `cfn-lint`, `SQLFluff` (Redshift dialect via [`.sqlfluff`](.sqlfluff)), `23/23` Python unit tests (`test_ingestion_guards.py` + `test_sqs_parser.py`), offline `dbt parse` (`$0` AWS cost, structural SQL/YAML validation), and Astro Docker build + `3` DAG pytests.
   * *Live Warehouse Contract Tests (`5.0.0` E2E run):* `11` dbt schema tests declared in `dbt/models/marts/schema.yml` (`unique`, `not_null`, `relationships`, `accepted_values`) executed against live Redshift Serverless during the `5.0.0` verification run.
 
 ### 3. Cloud Security & FinOps
 * **Split Least-Privilege IAM:** `RedshiftS3ReadOnlyRole` reads strictly `raw/*` via STS `AssumeRole` (`aws:SourceAccount` constrained); `AirflowRuntimePolicy` handles `SqsMainQueue` + S3 `raw/*` (`GET/DELETE`) & `archive/*` (`GET/PUT`, no `DELETE`); `DlqOperatorPolicy` isolates DLQ inspection and `StartMessageMoveTask` redrive permissions; `PipelineAlertTopicPolicy` locks SNS publishing to account CloudWatch alarms.
 * **Workload-Driven Compute:** Stopping Astro (`astro dev stop`) halts SQS polling immediately (`$0` compute), `ecommerce_dbt_full_refresh_maintenance` starts paused (`is_paused_upon_creation=True`), S3 Lifecycle expires `archive/` after 90 days and noncurrent versions after 30 days, and [`scripts/export_to_csv.py`](scripts/export_to_csv.py) exports clean marts to `exports/` for offline Power BI analysis.
 
-### 4. Data Modeling (Kimball Dimensional Modeling)
+### 4. Data Modeling & Redshift Physical Design (Kimball Dimensional Modeling)
 * **`raw_data` (Bronze):** 9 raw Olist tables (99,441 orders).
 * **`public_staging` (Silver - Views):** 7 views standardizing types and fixing upstream column typos.
-* **`public_marts` (Gold - Physical & Incremental Tables):**
-  * **`fct_orders` (`incremental`, `delete+insert`):** Multi-source `affected_order_ids` CTE tracking changes across `stg_orders`, `stg_order_items`, `stg_payments`, and `stg_reviews`, computing `total_order_cost`, `primary_payment_type`, `is_delayed` (`NULL` when pending), and `delivery_status` (`'Pending Delivery'`, `'Delayed'`, `'On Time'`).
-  * **`dim_customers` (`incremental`, `delete+insert` — Grain Trade-off):** In Olist, each order receives a new surrogate `customer_id` even for returning buyers (`customer_unique_id`). `dim_customers` intentionally preserves `customer_id` grain (`99,441` rows) to guarantee unambiguous `1:1` Star Schema joins with `fct_orders`, while LTV (`total_orders`, `lifetime_spend`) is window-aggregated over `customer_unique_id`.
-  * **`dim_products` (`table`):** Static product catalog with English translations and volumetric attributes.
+* **`public_marts` (Gold - Physical & Incremental Tables with Redshift `DISTKEY` / `SORTKEY`):**
+  * **`fct_orders` (`incremental`, `delete+insert` | `DISTKEY(customer_id)`, `SORTKEY(order_purchase_timestamp, order_status)`):** Multi-source `affected_order_ids` CTE tracking changes across `stg_orders`, `stg_order_items`, `stg_payments`, and `stg_reviews`, computing `total_order_cost`, `primary_payment_type`, `is_delayed` (`NULL` when pending), and `delivery_status` (`'Pending Delivery'`, `'Delayed'`, `'On Time'`). Colocating with `dim_customers` on `customer_id` eliminates network shuffle during `1:1` joins, while compound sort keys enable Zone Map pruning on time-range slicers and `order_status = 'delivered'` filters.
+  * **`dim_customers` (`incremental`, `delete+insert` | `DISTKEY(customer_id)`, `SORTKEY(customer_unique_id, most_recent_order_date)`):** In Olist, each order receives a new surrogate `customer_id` even for returning buyers (`customer_unique_id`). `dim_customers` intentionally preserves `customer_id` grain (`99,441` rows) to guarantee colocated `1:1` Star Schema joins with `fct_orders`, while LTV (`total_orders`, `lifetime_spend`) is aggregated over `customer_unique_id` and sorted for incremental high-water mark scans.
+  * **`dim_products` (`table` | `DISTSTYLE ALL`, `SORTKEY(category_name, product_id)`):** Small static product catalog (`32,951` rows) broadcast to every Redshift compute slice (`dist='all'`) for zero-shuffle joins with order items, sorted by English `category_name` for fast category rollups.
 
 ---
 
@@ -195,8 +195,8 @@ aws_data_pipeline/
 │   └── RETROSPECTIVE.vi.md                   # Engineering retrospective & V2->V5 verification report (VI)
 ├── tests/
 │   ├── dags/test_dag_example.py              # Pytest DAG validation (imports, tags, retries >= 2)
-│   ├── test_ingestion_guards.py              # Unit tests for header, empty-stage & Safe ACK guards (11/11 passing)
-│   └── test_sqs_parser.py                    # Unit tests for SQS + Airflow 3 Mapping accessor parsing (10/10 passing)
+│   ├── test_ingestion_guards.py              # Unit tests for header, empty-stage, VersionId & Safe ACK (12/12 passing)
+│   └── test_sqs_parser.py                    # Unit tests for SQS, sequencer ordering & Mapping accessor (11/11 passing)
 ├── images/                                   # V2-V5 Draw.io diagrams (.drawio + .png) and live verification screenshots
 ├── scripts/
 │   ├── create_raw_tables.sql                 # Redshift DDL for raw_data schema
@@ -206,6 +206,7 @@ aws_data_pipeline/
 │   └── upload_to_s3.sh                       # Bash script for S3 raw data synchronization
 ├── Dockerfile                                # Astronomer Runtime 3.3 Dockerfile
 ├── Makefile                                  # Shortcuts: verify, cfn-validate, cfn-deploy, cfn-status, cfn-delete, export-data
+├── .sqlfluff                                 # SQLFluff configuration (Redshift dialect + dbt Jinja builtins)
 ├── pyproject.toml                            # Ruff lint configuration
 └── requirements.txt                          # Python dependencies (cosmos, dbt-redshift, apache-airflow-providers-amazon)
 ```

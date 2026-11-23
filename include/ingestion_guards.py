@@ -161,6 +161,27 @@ def build_deterministic_archive_key(audit_id: str, filename: str) -> str:
     return f"archive/{safe_audit_id}/{clean_filename}"
 
 
+def build_s3_copy_source(
+    bucket: str,
+    key: str,
+    version_id: str | None = None,
+) -> dict[str, str]:
+    """
+    Tạo tham số `CopySource` cho boto3 `s3.copy_object`.
+    Khi S3 Bucket bật Versioning và event có `versionId` hợp lệ (khác rỗng và khác "null"),
+    ghim trực tiếp `VersionId` để đảm bảo bản ghi lưu sang `archive/` đúng với phiên bản
+    đối tượng của sự kiện kích hoạt, tránh lệch phiên bản nếu key bị ghi đè nhanh.
+    """
+    copy_source: dict[str, str] = {
+        "Bucket": bucket.strip(),
+        "Key": key.strip().lstrip("/"),
+    }
+    clean_version = (version_id or "").strip()
+    if clean_version and clean_version.lower() != "null":
+        copy_source["VersionId"] = clean_version
+    return copy_source
+
+
 def verify_safe_to_ack_when_raw_missing(
     audit_status: str | None,
     archive_exists: bool,

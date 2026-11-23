@@ -338,6 +338,62 @@ class TestSqsParser(unittest.TestCase):
         self.assertEqual(len(extracted), 1)
         self.assertEqual(extracted[0]["ReceiptHandle"], "rh-accessor")
 
+    def test_parse_out_of_order_sequencer_keeps_newer_metadata_and_all_handles(self):
+        # Event mới (sequencer lớn hơn) đến trước, event cũ (sequencer nhỏ hơn) đến sau
+        # -> phải giữ versionId / event_token mới nhất nhưng vẫn gom đủ cả 2 ReceiptHandles
+        newer_msg = {
+            "MessageId": "m-newer",
+            "ReceiptHandle": "rh-newer",
+            "Body": json.dumps({
+                "Records": [
+                    {
+                        "eventSource": "aws:s3",
+                        "eventName": "ObjectCreated:Put",
+                        "s3": {
+                            "bucket": {"name": "olist-v5-bucket"},
+                            "object": {
+                                "key": "raw/olist_orders_dataset.csv",
+                                "versionId": "ver-2",
+                                "eTag": "etag-2",
+                                "sequencer": "00673B000000000002",
+                            },
+                        },
+                    }
+                ]
+            }),
+        }
+        older_msg = {
+            "MessageId": "m-older",
+            "ReceiptHandle": "rh-older",
+            "Body": json.dumps({
+                "Records": [
+                    {
+                        "eventSource": "aws:s3",
+                        "eventName": "ObjectCreated:Put",
+                        "s3": {
+                            "bucket": {"name": "olist-v5-bucket"},
+                            "object": {
+                                "key": "raw/olist_orders_dataset.csv",
+                                "versionId": "ver-1",
+                                "eTag": "etag-1",
+                                "sequencer": "00673B000000000001",
+                            },
+                        },
+                    }
+                ]
+            }),
+        }
+
+        valid_files, _ = parse_sqs_s3_events(
+            [newer_msg, older_msg], expected_bucket="olist-v5-bucket"
+        )
+        self.assertEqual(len(valid_files), 1)
+        item = valid_files[0]
+        self.assertEqual(item["version_id"], "ver-2")
+        self.assertEqual(item["event_token"], "ver_ver-2")
+        self.assertEqual(item["sequencer"], "00673B000000000002")
+        self.assertEqual(item["receipt_handles"], ["rh-newer", "rh-older"])
+
 
 if __name__ == "__main__":
     unittest.main()

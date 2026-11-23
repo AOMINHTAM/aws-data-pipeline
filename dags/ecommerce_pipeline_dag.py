@@ -15,6 +15,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 from include.ingestion_guards import (  # noqa: E402
     build_audit_id,
     build_deterministic_archive_key,
+    build_s3_copy_source,
     ensure_non_empty_stage,
     filter_ackable_missing_raw_handles,
     validate_csv_header,
@@ -669,18 +670,28 @@ with DAG(
                 )
 
                 if s3_hook.check_for_key(src_key, bucket_name=S3_BUCKET):
-                    # 1. Copy S3: raw/ -> archive/<safe_audit_id>/<filename> (deterministic)
-                    s3_hook.copy_object(
-                        source_bucket_key=src_key,
-                        dest_bucket_key=dest_key,
-                        source_bucket_name=S3_BUCKET,
-                        dest_bucket_name=S3_BUCKET,
+                    # 1. Copy S3: raw/ -> archive/<safe_audit_id>/<file> (ghim VersionId)
+                    source_version_id = str(item.get("version_id") or "").strip()
+                    copy_source = build_s3_copy_source(
+                        S3_BUCKET,
+                        src_key,
+                        version_id=source_version_id,
+                    )
+                    s3_hook.get_conn().copy_object(
+                        Bucket=S3_BUCKET,
+                        Key=dest_key,
+                        CopySource=copy_source,
                     )
                     if not s3_hook.check_for_key(dest_key, bucket_name=S3_BUCKET):
                         raise RuntimeError(
                             f"S3 Archive verification failed: '{dest_key}' not found after copy."
                         )
-                    print(f"📦 S3 Archive verified: {src_key} -> {dest_key}")
+                    version_note = (
+                        f" (VersionId={copy_source['VersionId']})"
+                        if "VersionId" in copy_source
+                        else ""
+                    )
+                    print(f"📦 S3 Archive verified: {src_key}{version_note} -> {dest_key}")
 
                     # 2. Ghi nhận ARCHIVED (fail-closed) TRƯỚC KHI xóa raw/
                     _record_audit_event(

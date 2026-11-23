@@ -3,7 +3,9 @@
         materialized='incremental',
         unique_key='order_id',
         incremental_strategy='delete+insert',
-        on_schema_change='sync_all_columns'
+        on_schema_change='sync_all_columns',
+        dist='customer_id',
+        sort=['order_purchase_timestamp', 'order_status']
     )
 }}
 
@@ -48,8 +50,9 @@ payments_agg as (
         pp.primary_payment_type
     from {{ ref('stg_payments') }} p
     left join primary_payment pp
-        on p.order_id = pp.order_id
-        and pp.rn = 1
+        on
+            p.order_id = pp.order_id
+            and pp.rn = 1
     group by p.order_id, pp.primary_payment_type
 ),
 
@@ -71,19 +74,23 @@ affected_order_ids as (
     from {{ ref('stg_orders') }} o
     left join {{ this }} t
         on o.order_id = t.order_id
-    where t.order_id is null
-       or o.order_purchase_timestamp >= (
-           select dateadd(day, -3, coalesce(max(order_purchase_timestamp), cast('2016-01-01' as timestamp)))
-           from {{ this }}
-       )
-       or o.order_delivered_customer_date >= (
-           select dateadd(day, -3, coalesce(max(order_delivered_customer_date), cast('2016-01-01' as timestamp)))
-           from {{ this }}
-       )
-       or coalesce(o.order_status, '') <> coalesce(t.order_status, '')
-       or coalesce(o.order_approved_at, cast('1900-01-01' as timestamp)) <> coalesce(t.order_approved_at, cast('1900-01-01' as timestamp))
-       or coalesce(o.order_delivered_customer_date, cast('1900-01-01' as timestamp)) <> coalesce(t.order_delivered_customer_date, cast('1900-01-01' as timestamp))
-       or coalesce(o.order_estimated_delivery_date, cast('1900-01-01' as timestamp)) <> coalesce(t.order_estimated_delivery_date, cast('1900-01-01' as timestamp))
+    where
+        t.order_id is null
+        or o.order_purchase_timestamp >= (
+            select dateadd(day, -3, coalesce(max(tgt.order_purchase_timestamp), cast('2016-01-01' as timestamp)))
+            from {{ this }} tgt
+        )
+        or o.order_delivered_customer_date >= (
+            select dateadd(day, -3, coalesce(max(tgt.order_delivered_customer_date), cast('2016-01-01' as timestamp)))
+            from {{ this }} tgt
+        )
+        or coalesce(o.order_status, '') <> coalesce(t.order_status, '')
+        or coalesce(o.order_approved_at, cast('1900-01-01' as timestamp))
+        <> coalesce(t.order_approved_at, cast('1900-01-01' as timestamp))
+        or coalesce(o.order_delivered_customer_date, cast('1900-01-01' as timestamp))
+        <> coalesce(t.order_delivered_customer_date, cast('1900-01-01' as timestamp))
+        or coalesce(o.order_estimated_delivery_date, cast('1900-01-01' as timestamp))
+        <> coalesce(t.order_estimated_delivery_date, cast('1900-01-01' as timestamp))
 
     union
 
@@ -92,9 +99,10 @@ affected_order_ids as (
     from {{ this }} t
     left join order_items_agg oi
         on t.order_id = oi.order_id
-    where coalesce(oi.total_items, 0) <> coalesce(t.total_items, 0)
-       or coalesce(oi.total_item_value, 0) <> coalesce(t.total_item_value, 0)
-       or coalesce(oi.total_freight_value, 0) <> coalesce(t.total_freight_value, 0)
+    where
+        coalesce(oi.total_items, 0) <> coalesce(t.total_items, 0)
+        or coalesce(oi.total_item_value, 0) <> coalesce(t.total_item_value, 0)
+        or coalesce(oi.total_freight_value, 0) <> coalesce(t.total_freight_value, 0)
 
     union
 
@@ -103,9 +111,10 @@ affected_order_ids as (
     from {{ this }} t
     left join payments_agg p
         on t.order_id = p.order_id
-    where coalesce(p.total_payment_value, 0) <> coalesce(t.total_payment_value, 0)
-       or coalesce(p.max_installments, -1) <> coalesce(t.max_installments, -1)
-       or coalesce(p.primary_payment_type, '') <> coalesce(t.primary_payment_type, '')
+    where
+        coalesce(p.total_payment_value, 0) <> coalesce(t.total_payment_value, 0)
+        or coalesce(p.max_installments, -1) <> coalesce(t.max_installments, -1)
+        or coalesce(p.primary_payment_type, '') <> coalesce(t.primary_payment_type, '')
 
     union
 
@@ -114,11 +123,13 @@ affected_order_ids as (
     from {{ this }} t
     left join reviews_agg r
         on t.order_id = r.order_id
-    where r.latest_review_at >= (
-        select dateadd(day, -3, coalesce(max(order_purchase_timestamp), cast('2016-01-01' as timestamp)))
-        from {{ this }}
-    )
-       or coalesce(cast(r.review_score as decimal(10, 4)), -1) <> coalesce(cast(t.review_score as decimal(10, 4)), -1)
+    where
+        r.latest_review_at >= (
+            select dateadd(day, -3, coalesce(max(tgt.order_purchase_timestamp), cast('2016-01-01' as timestamp)))
+            from {{ this }} tgt
+        )
+        or coalesce(cast(r.review_score as decimal(10, 4)), -1)
+        <> coalesce(cast(t.review_score as decimal(10, 4)), -1)
 ),
 
 orders as (

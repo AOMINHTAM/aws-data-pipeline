@@ -22,6 +22,21 @@ CSV_TO_RAW_TABLE = {
 }
 
 
+def _is_newer_s3_event(candidate_sequencer: str, current_sequencer: str) -> bool:
+    """
+    So sánh thứ tự ghi của 2 sự kiện S3 trên cùng một key dựa vào chuỗi hex `sequencer`
+    (AWS S3 đảm bảo thứ tự từ điển của `sequencer` phản ánh đúng thứ tự ghi theo thời gian).
+    Giúp tránh trường hợp SQS Standard giao lệch thứ tự khiến event cũ ghi đè metadata event mới.
+    """
+    cand = (candidate_sequencer or "").strip()
+    curr = (current_sequencer or "").strip()
+    if cand and curr:
+        return cand >= curr
+    if curr and not cand:
+        return False
+    return True
+
+
 def _extract_event_token(object_data: Mapping[str, Any], message_id: str = "") -> str:
     """
     Trích xuất định danh sự kiện S3 bất biến (ưu tiên versionId -> eTag -> sequencer -> MessageId)
@@ -171,14 +186,15 @@ def parse_sqs_s3_events(
                     "sequencer": sequencer,
                 }
             else:
-                if event_token:
-                    files_by_key[s3_key]["event_token"] = event_token
-                if version_id:
-                    files_by_key[s3_key]["version_id"] = version_id
-                if etag:
-                    files_by_key[s3_key]["etag"] = etag
-                if sequencer:
-                    files_by_key[s3_key]["sequencer"] = sequencer
+                if _is_newer_s3_event(sequencer, files_by_key[s3_key].get("sequencer", "")):
+                    if event_token:
+                        files_by_key[s3_key]["event_token"] = event_token
+                    if version_id:
+                        files_by_key[s3_key]["version_id"] = version_id
+                    if etag:
+                        files_by_key[s3_key]["etag"] = etag
+                    if sequencer:
+                        files_by_key[s3_key]["sequencer"] = sequencer
 
             for handle in msg_handles:
                 if handle not in files_by_key[s3_key]["receipt_handles"]:

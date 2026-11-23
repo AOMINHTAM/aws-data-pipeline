@@ -67,8 +67,11 @@ jobs:
           python-version: "3.12"
           cache: "pip"
 
-      - name: Install dbt-redshift
-        run: python -m pip install --upgrade pip dbt-redshift
+      - name: Install dbt-redshift and SQLFluff linter
+        run: python -m pip install --upgrade pip dbt-redshift sqlfluff
+
+      - name: Lint dbt SQL models (SQLFluff Redshift dialect)
+        run: sqlfluff lint dbt/models/
 
       - name: Parse dbt project & validate SQL/YAML graphs (offline)
         env:

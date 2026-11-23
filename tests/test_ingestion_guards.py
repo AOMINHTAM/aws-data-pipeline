@@ -10,6 +10,7 @@ import unittest
 from include.ingestion_guards import (
     build_audit_id,
     build_deterministic_archive_key,
+    build_s3_copy_source,
     ensure_non_empty_stage,
     filter_ackable_missing_raw_handles,
     validate_csv_header,
@@ -159,6 +160,41 @@ class TestIngestionGuards(unittest.TestCase):
             active_load_items,
         )
         self.assertEqual(ackable, ["rh-isolated-dup"])
+
+    def test_build_s3_copy_source_pins_valid_version_id_and_ignores_null(self):
+        pinned = build_s3_copy_source(
+            "olist-v5-bucket",
+            "/raw/olist_orders_dataset.csv",
+            version_id="ver-98765",
+        )
+        self.assertEqual(
+            pinned,
+            {
+                "Bucket": "olist-v5-bucket",
+                "Key": "raw/olist_orders_dataset.csv",
+                "VersionId": "ver-98765",
+            },
+        )
+
+        unpinned_null = build_s3_copy_source(
+            "olist-v5-bucket",
+            "raw/olist_orders_dataset.csv",
+            version_id="null",
+        )
+        self.assertEqual(
+            unpinned_null,
+            {
+                "Bucket": "olist-v5-bucket",
+                "Key": "raw/olist_orders_dataset.csv",
+            },
+        )
+
+        unpinned_empty = build_s3_copy_source(
+            "olist-v5-bucket",
+            "raw/olist_orders_dataset.csv",
+            version_id="",
+        )
+        self.assertNotIn("VersionId", unpinned_empty)
 
 
 if __name__ == "__main__":
