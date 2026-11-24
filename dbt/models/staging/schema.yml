@@ -1,0 +1,165 @@
+version: 2
+
+models:
+  - name: stg_orders
+    description: "Silver view chuẩn hóa đơn hàng từ raw_data.orders"
+    columns:
+      - name: order_id
+        data_tests:
+          - unique
+          - not_null
+      - name: customer_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_customers')
+                field: customer_id
+      - name: order_status
+        data_tests:
+          - not_null
+
+  - name: stg_order_items
+    description: "Silver view chi tiết món hàng, bổ sung total_item_value = price + freight_value"
+    data_tests:
+      - composite_unique:
+          arguments:
+            combination_of_columns:
+              - order_id
+              - order_item_id
+    columns:
+      - name: order_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_orders')
+                field: order_id
+      - name: order_item_id
+        data_tests:
+          - not_null
+      - name: product_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_products')
+                field: product_id
+      - name: seller_id
+        data_tests:
+          - not_null
+      - name: price
+        data_tests:
+          - not_null
+          - non_negative
+      - name: freight_value
+        data_tests:
+          - not_null
+          - non_negative
+      - name: total_item_value
+        data_tests:
+          - not_null
+          - non_negative
+
+  - name: stg_payments
+    description: "Silver view thanh toán đơn hàng"
+    data_tests:
+      - composite_unique:
+          arguments:
+            combination_of_columns:
+              - order_id
+              - payment_sequential
+    columns:
+      - name: order_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_orders')
+                field: order_id
+      - name: payment_sequential
+        data_tests:
+          - not_null
+      - name: payment_type
+        data_tests:
+          - not_null
+      - name: payment_installments
+        data_tests:
+          - not_null
+          - non_negative
+      - name: payment_value
+        data_tests:
+          - not_null
+          - non_negative
+
+  - name: stg_reviews
+    description: "Silver view đánh giá đơn hàng"
+    data_tests:
+      - composite_unique:
+          arguments:
+            combination_of_columns:
+              - review_id
+              - order_id
+    columns:
+      - name: review_id
+        data_tests:
+          - not_null
+      - name: order_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_orders')
+                field: order_id
+      - name: review_score
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [1, 2, 3, 4, 5]
+                quote: false
+
+  - name: stg_customers
+    description: "Silver view khách hàng đã chuẩn hóa zip_code, city, state"
+    columns:
+      - name: customer_id
+        data_tests:
+          - unique
+          - not_null
+      - name: customer_unique_id
+        data_tests:
+          - not_null
+      - name: state
+        data_tests:
+          - not_null
+
+  - name: stg_products
+    description: "Silver view sản phẩm đã sửa lỗi chính tả cột gốc (_lenght -> _length)"
+    columns:
+      - name: product_id
+        data_tests:
+          - unique
+          - not_null
+      - name: product_category_name
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('stg_category_translation')
+                field: product_category_name
+              config:
+                severity: warn
+      - name: product_weight_g
+        data_tests:
+          - non_negative
+
+  - name: stg_category_translation
+    description: "Silver view bảng dịch ngành hàng tiếng Bồ Đào Nha -> tiếng Anh"
+    columns:
+      - name: product_category_name
+        data_tests:
+          - unique
+          - not_null
+      - name: product_category_name_english
+        data_tests:
+          - unique
+          - not_null

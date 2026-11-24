@@ -9,7 +9,7 @@
 An **event-driven, fault-tolerant ELT Data Pipeline** built as a personal Cloud Engineering project on **AWS** using **Infrastructure as Code (AWS CloudFormation)**, **Amazon S3 (Versioned Data Lake)**, **Amazon SQS + Dead-Letter Queue (DLQ)**, **Amazon CloudWatch (4 Alarms) + Amazon SNS**, **Amazon Redshift Serverless**, **dbt Core**, and **Apache Airflow 3 (Astro CLI & Astronomer Cosmos)**.
 
 > 🌐 **Portfolio Case Study & Diagrams:** [View V5 Case Study on Portfolio →](https://aominhtam-portfolio.vercel.app/projects/aws-data-pipeline.html)  
-> 📌 **Verification Boundary (`5.0.0` vs. `5.0.1` / `5.0.2`):** Tag **`5.0.0`** passed full live E2E AWS verification (`17/17` tasks, `11` dbt schema tests on Redshift, empty-CSV DLQ → CloudWatch → SNS → Redrive). Tags **`5.0.1`** (13 cross-review edge cases) and **`5.0.2`** (Redshift `DISTKEY`/`SORTKEY` physical design, `SQLFluff` SQL linting, S3 `VersionId`-pinned archive copy & `sequencer` event ordering) are verified by `23/23` Python unit tests, `3` DAG pytests, `Ruff`, `cfn-lint`, `SQLFluff`, and offline `dbt parse` in GitHub Actions CI (pending next live stack rerun).
+> 📌 **Verification Boundary (`5.0.0` vs. `5.0.2` / `5.2.0`):** Tag **`5.0.0`** passed full live E2E AWS verification (`17/17` tasks, `11` Gold dbt schema tests on Redshift, empty-CSV DLQ → CloudWatch → SNS → Redrive). Tag **`5.0.2`** added Redshift `DISTKEY`/`SORTKEY`, `SQLFluff`, and `VersionId`/`sequencer` hardening; **`5.2.0`** expands Data Quality to **`124` compiled dbt tests** across Bronze (`44`), Silver (`45`), and Gold (`31` schema + `4` singular reconciliation tests) — all verified by `23/23` Python unit tests, `3` DAG pytests, `Ruff`, `cfn-lint`, `SQLFluff`, offline `dbt parse`, and empirical Olist CSV checks (pending next live Redshift stack rerun).
 
 Upgraded from the **V4 (`v4.0.1`)** Event-Driven Data Core into **V5 Production CloudOps (AWS First Cloud Journey Standard)**:
 * **100% Reproducible CloudFormation IaC ([`infra/cloudformation/template.yaml`](infra/cloudformation/template.yaml)):** Provisions 15 core resources (and 4 conditional FinOps/Redshift resources) with **Native Stack Auto-Rollback**, `cfn-lint` CI validation, and 1-command versioned bucket clean-up (`make cfn-delete`).
@@ -145,8 +145,9 @@ Dependency lineage from 9 `raw_data` sources through 7 `public_staging` views in
 * **Two-Phase Batch Staging (DB Atomicity vs. Cross-System Orchestration):** Validates CSV headers (`validate_csv_header`), stages all batch CSVs into Redshift `TEMP TABLE`s, enforces [`ensure_non_empty_stage`](include/ingestion_guards.py) (`staged_rows > 0`), and executes `DELETE + INSERT` + `SWAPPED` audit logging inside the same explicit `autocommit=False` Redshift transaction (DB-level atomicity—*not* a distributed 2PC transaction across S3/SQS).
 * **At-Least-Once Delivery, Version-Pinned Archive & Deterministic Safe ACK:** SQS enforces **at-least-once** delivery (not strict exactly-once transport). [`dags/ecommerce_pipeline_dag.py`](dags/ecommerce_pipeline_dag.py) refreshes `VisibilityTimeout=900s` (fail-closed prior to S3 modifications), copies the exact S3 object `VersionId` via [`build_s3_copy_source`](include/ingestion_guards.py) into cross-run deterministic `archive/<audit_id>/<filename>`, logs `SWAPPED` → `ARCHIVED` → `COMPLETED` (or `FAILED`), defers multi-record SQS ACKs until batch completion, and enforces [`verify_safe_to_ack_when_raw_missing`](include/ingestion_guards.py) in both Task 1 and Task 3 so duplicate redeliveries remain idempotent and a missing `raw/` object never causes a blind SQS ACK.
 * **Testing & CI Separation (Verified vs. Declared Scope):**
-  * *GitHub Actions CI (executed on every push/PR to `main`):* Ruff lint, `cfn-lint`, `SQLFluff` (Redshift dialect via [`.sqlfluff`](.sqlfluff)), `23/23` Python unit tests (`test_ingestion_guards.py` + `test_sqs_parser.py`), offline `dbt parse` (`$0` AWS cost, structural SQL/YAML validation), and Astro Docker build + `3` DAG pytests.
-  * *Live Warehouse Contract Tests (`5.0.0` E2E run):* `11` dbt schema tests declared in `dbt/models/marts/schema.yml` (`unique`, `not_null`, `relationships`, `accepted_values`) executed against live Redshift Serverless during the `5.0.0` verification run.
+  * *GitHub Actions CI (executed on every push/PR to `main`):* Ruff lint, `cfn-lint`, `SQLFluff` (Redshift dialect across `dbt/models/` and `dbt/tests/*.sql` via [`.sqlfluff`](.sqlfluff)), `23/23` Python unit tests (`test_ingestion_guards.py` + `test_sqs_parser.py`), offline `dbt parse` compiling all **`124` dbt tests** (`$0` AWS cost, structural SQL/YAML validation), and Astro Docker build + `3` DAG pytests.
+  * *3-Layer Medallion Data Quality (`5.2.0` Declared Suite — `124` dbt Tests):* Bronze `raw_data` (`44` source tests in [`sources.yml`](dbt/models/staging/sources.yml)), Silver `public_staging` (`45` view contract & FK tests in [`staging/schema.yml`](dbt/models/staging/schema.yml)), and Gold `public_marts` (`31` schema tests in [`marts/schema.yml`](dbt/models/marts/schema.yml) + `4` cross-layer financial & SLA singular tests in [`dbt/tests/`](dbt/tests/)).
+  * *Live Warehouse Contract Tests (`5.0.0` E2E run):* The initial `11` Gold dbt schema tests in `dbt/models/marts/schema.yml` (`unique`, `not_null`, `relationships`, `accepted_values`) executed and passed against live Redshift Serverless during the `5.0.0` verification run.
 
 ### 3. Cloud Security & FinOps
 * **Split Least-Privilege IAM:** `RedshiftS3ReadOnlyRole` reads strictly `raw/*` via STS `AssumeRole` (`aws:SourceAccount` constrained); `AirflowRuntimePolicy` handles `SqsMainQueue` + S3 `raw/*` (`GET/DELETE`) & `archive/*` (`GET/PUT`, no `DELETE`); `DlqOperatorPolicy` isolates DLQ inspection and `StartMessageMoveTask` redrive permissions; `PipelineAlertTopicPolicy` locks SNS publishing to account CloudWatch alarms.
@@ -178,9 +179,10 @@ aws_data_pipeline/
 ├── dbt/
 │   ├── dbt_project.yml                       # dbt project configuration & materializations
 │   ├── profiles.yml                          # Redshift connection profile with env variables
-│   └── models/
-│       ├── staging/                          # Staging layer (7 views + sources.yml)
-│       └── marts/                            # Marts layer (fct_orders, dim_customers, dim_products + schema.yml tests)
+│   ├── models/
+│   │   ├── staging/                          # Staging layer (7 views + sources.yml [44] + schema.yml [45])
+│   │   └── marts/                            # Marts layer (fct_orders, dim_customers, dim_products + schema.yml [31])
+│   └── tests/                                # Custom generic test macros (generic/) + 4 singular reconciliation tests
 ├── include/
 │   ├── ingestion_guards.py                   # Empty-stage guard, deterministic archive key, and Safe ACK verifier
 │   └── sqs_parser.py                         # SQS S3 Event JSON parser, Mapping accessor extractor & deduplicator

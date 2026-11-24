@@ -8,19 +8,198 @@ sources:
     tables:
       - name: orders
         description: "Bảng đơn hàng thô"
+        columns:
+          - name: order_id
+            description: "Khóa chính đơn hàng"
+            data_tests:
+              - unique
+              - not_null
+          - name: customer_id
+            description: "Khóa ngoại khách hàng theo đơn"
+            data_tests:
+              - not_null
+          - name: order_status
+            description: "Trạng thái hiện tại của đơn hàng"
+            data_tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values:
+                      - delivered
+                      - shipped
+                      - canceled
+                      - unavailable
+                      - invoiced
+                      - processing
+                      - created
+                      - approved
+          - name: order_purchase_timestamp
+            description: "Thời điểm đặt hàng"
+            data_tests:
+              - not_null
+          - name: order_estimated_delivery_date
+            description: "Ngày giao hàng dự kiến"
+            data_tests:
+              - not_null
+
       - name: order_items
         description: "Bảng chi tiết các mặt hàng trong đơn hàng"
+        data_tests:
+          - composite_unique:
+              arguments:
+                combination_of_columns:
+                  - order_id
+                  - order_item_id
+        columns:
+          - name: order_id
+            description: "Mã đơn hàng"
+            data_tests:
+              - not_null
+          - name: order_item_id
+            description: "Số thứ tự món hàng trong đơn"
+            data_tests:
+              - not_null
+          - name: product_id
+            description: "Mã sản phẩm"
+            data_tests:
+              - not_null
+          - name: seller_id
+            description: "Mã người bán"
+            data_tests:
+              - not_null
+          - name: price
+            description: "Giá bán món hàng"
+            data_tests:
+              - not_null
+              - non_negative
+          - name: freight_value
+            description: "Phí vận chuyển phân bổ cho món hàng"
+            data_tests:
+              - not_null
+              - non_negative
+
       - name: order_payments
         description: "Bảng thanh toán đơn hàng"
+        data_tests:
+          - composite_unique:
+              arguments:
+                combination_of_columns:
+                  - order_id
+                  - payment_sequential
+        columns:
+          - name: order_id
+            description: "Mã đơn hàng"
+            data_tests:
+              - not_null
+          - name: payment_sequential
+            description: "Thứ tự lượt thanh toán trong đơn"
+            data_tests:
+              - not_null
+          - name: payment_type
+            description: "Phương thức thanh toán"
+            data_tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values:
+                      - credit_card
+                      - boleto
+                      - voucher
+                      - debit_card
+                      - not_defined
+          - name: payment_installments
+            description: "Số kỳ trả góp"
+            data_tests:
+              - not_null
+              - non_negative
+          - name: payment_value
+            description: "Giá trị thanh toán"
+            data_tests:
+              - not_null
+              - non_negative
+
       - name: order_reviews
         description: "Bảng đánh giá đơn hàng từ khách hàng"
+        data_tests:
+          - composite_unique:
+              arguments:
+                combination_of_columns:
+                  - review_id
+                  - order_id
+        columns:
+          - name: review_id
+            description: "Mã đánh giá (có thể gắn với nhiều đơn hàng trong Olist)"
+            data_tests:
+              - not_null
+          - name: order_id
+            description: "Mã đơn hàng được đánh giá"
+            data_tests:
+              - not_null
+          - name: review_score
+            description: "Điểm đánh giá từ 1 đến 5"
+            data_tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values: [1, 2, 3, 4, 5]
+                    quote: false
+
       - name: customers
         description: "Bảng thông tin khách hàng"
+        columns:
+          - name: customer_id
+            description: "Khóa chính khách hàng theo đơn"
+            data_tests:
+              - unique
+              - not_null
+          - name: customer_unique_id
+            description: "Định danh người mua thật"
+            data_tests:
+              - not_null
+          - name: customer_state
+            description: "Mã bang của khách hàng"
+            data_tests:
+              - not_null
+
       - name: products
         description: "Bảng thông tin sản phẩm"
+        columns:
+          - name: product_id
+            description: "Khóa chính sản phẩm"
+            data_tests:
+              - unique
+              - not_null
+          - name: product_weight_g
+            description: "Trọng lượng sản phẩm (gram, cho phép NULL ở dữ liệu gốc)"
+            data_tests:
+              - non_negative
+
       - name: sellers
         description: "Bảng thông tin người bán"
+        columns:
+          - name: seller_id
+            description: "Khóa chính người bán"
+            data_tests:
+              - unique
+              - not_null
+          - name: seller_state
+            description: "Mã bang của người bán"
+            data_tests:
+              - not_null
+
       - name: product_category_name_translation
         description: "Bảng dịch danh mục sản phẩm từ tiếng Bồ Đào Nha sang tiếng Anh"
+        columns:
+          - name: product_category_name
+            description: "Tên danh mục tiếng Bồ Đào Nha"
+            data_tests:
+              - unique
+              - not_null
+          - name: product_category_name_english
+            description: "Tên danh mục tiếng Anh"
+            data_tests:
+              - unique
+              - not_null
+
       - name: geolocation
-        description: "Bảng tọa độ địa lý các vùng ở Brazil"
+        description: "Bảng tọa độ địa lý các vùng ở Brazil (chưa dùng downstream, miễn test quét bảng để tối ưu FinOps)"

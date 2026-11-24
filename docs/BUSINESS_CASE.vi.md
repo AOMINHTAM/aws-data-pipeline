@@ -57,12 +57,15 @@ Pipeline này giải quyết trọn vẹn các vấn đề trên bằng cách bi
 
 ## 4. Hợp đồng Chất lượng Dữ liệu Bảo vệ Chỉ số Kinh doanh
 
-Mỗi con số kinh doanh trước khi tới tay người dùng cuối đều được bảo vệ qua 2 lớp kiểm soát:
+Mỗi con số kinh doanh trước khi tới tay người dùng cuối đều được bảo vệ qua **lớp nạp Python + toàn bộ 3 tầng Medallion (`124` dbt tests)**:
 
 * **Lớp Bảo vệ Tầng Nạp (Trước khi ghi vào DWH):**
   * [`validate_csv_header`](../include/ingestion_guards.py) phát hiện sớm sai lệch schema/header của file CSV nguồn trước khi nạp vào Redshift.
   * [`ensure_non_empty_stage`](../include/ingestion_guards.py) chặn đứng file CSV 0 dòng dữ liệu và `rollback()` giao dịch (`autocommit=False`), bảo vệ dữ liệu báo cáo hiện có không bị xóa nhầm.
-* **Lớp Kiểm thử Chất lượng dbt (`9/9` Automated Tests trong [`dbt/models/marts/schema.yml`](../dbt/models/marts/schema.yml)):**
-  * Đảm bảo khóa chính không trùng/không rỗng (`unique`, `not_null`) trên `fct_orders.order_id`, `dim_customers.customer_id`, `dim_products.product_id`, và `not_null` trên `customer_unique_id`.
-  * Đảm bảo toàn vẹn tham chiếu (`relationships`) từ `fct_orders.customer_id` sang `dim_customers.customer_id`.
-  * Khóa tập giá trị hợp lệ (`accepted_values`) cho `fct_orders.delivery_status` chỉ thuộc `['Pending Delivery', 'Delayed', 'On Time']`.
+* **Lớp Kiểm thử Tầng Bronze / Raw (`44` Tests trong [`dbt/models/staging/sources.yml`](../dbt/models/staging/sources.yml)):**
+  * Khóa chặt tính duy nhất đơn & tổ hợp (`order_id`, `[order_id, order_item_id]`, `[order_id, payment_sequential]`, `[review_id, order_id]`, `customer_id`, `product_id`, `seller_id`), giá trị không âm (`non_negative`), và tập giá trị hợp lệ (`order_status`, `payment_type`, `review_score` `1–5`) ngay tại nguồn trước khi chạy Silver/Gold.
+* **Lớp Kiểm thử Tầng Silver / Staging (`45` Tests trong [`dbt/models/staging/schema.yml`](../dbt/models/staging/schema.yml)):**
+  * Kiểm tra hợp đồng đầu ra của 7 views chuẩn hóa, `non_negative` trên `total_item_value`, toàn vẹn tham chiếu (`relationships`) giữa đơn hàng, món hàng, thanh toán, đánh giá, khách hàng, sản phẩm, và cảnh báo `severity: warn` cho nhóm sản phẩm chưa có bản dịch danh mục.
+* **Lớp Kiểm thử Tầng Gold / Marts & Đối soát Chéo tầng (`31` Schema Tests trong [`dbt/models/marts/schema.yml`](../dbt/models/marts/schema.yml) + `4` Singular Tests trong [`dbt/tests/`](../dbt/tests/)):**
+  * Khóa chính, khóa ngoại, các chỉ số doanh thu/LTV `non_negative`, và `accepted_values` cho `delivery_status` & `customer_segment`.
+  * 4 singular tests đối soát nghiệp vụ: phương trình `total_order_cost = total_item_value + total_freight_value`, khớp tổng doanh thu `fct_orders` với `stg_order_items` chống sai lệch incremental, tính nhất quán `delivery_status` / `is_delayed` / `delay_days`, và khớp `customer_segment` với `total_orders`.

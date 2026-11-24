@@ -57,12 +57,15 @@ To keep Power BI / offline analytics fast with **$0 idle Redshift RPU cost**, [`
 
 ## 4. Data Quality Contracts Protecting Business KPIs
 
-Every business metric exported to stakeholders is guarded at two layers before reaching `exports/` or BI dashboards:
+Every business metric exported to stakeholders is guarded across **ingestion + all 3 Medallion layers (`124` compiled dbt tests)** before reaching `exports/` or BI dashboards:
 
 * **Ingestion & Schema Contracts (Before DWH Swap):**
   * [`validate_csv_header`](../include/ingestion_guards.py) blocks upstream schema drift before loading Redshift.
   * [`ensure_non_empty_stage`](../include/ingestion_guards.py) aborts 0-row CSVs inside an explicit transaction (`autocommit=False`), preventing accidental wipeouts of historical business data.
-* **dbt Marts Quality Tests (`9/9` Automated Tests in [`dbt/models/marts/schema.yml`](../dbt/models/marts/schema.yml)):**
-  * Primary key integrity (`unique`, `not_null`) on `fct_orders.order_id`, `dim_customers.customer_id`, `dim_products.product_id`, plus `not_null` on `customer_unique_id`.
-  * Referential integrity (`relationships`) between `fct_orders.customer_id` and `dim_customers.customer_id`.
-  * Domain constraint (`accepted_values`) ensuring `fct_orders.delivery_status` only ever emits `['Pending Delivery', 'Delayed', 'On Time']`.
+* **Bronze / Raw Source Tests (`44` Tests in [`dbt/models/staging/sources.yml`](../dbt/models/staging/sources.yml)):**
+  * Enforces primary and composite uniqueness (`order_id`, `[order_id, order_item_id]`, `[order_id, payment_sequential]`, `[review_id, order_id]`, `customer_id`, `product_id`, `seller_id`), `non_negative` financial/weight checks, and `accepted_values` for `order_status`, `payment_type`, and `review_score` (`1–5`) before downstream models execute.
+* **Silver / Staging Contract Tests (`45` Tests in [`dbt/models/staging/schema.yml`](../dbt/models/staging/schema.yml)):**
+  * Validates standardized view schemas, `non_negative` derived `total_item_value`, strict referential integrity (`relationships`) across orders, items, payments, reviews, customers, and products, and `severity: warn` monitoring on untranslated product categories.
+* **Gold / Marts & Cross-Layer Reconciliation (`31` Schema Tests in [`dbt/models/marts/schema.yml`](../dbt/models/marts/schema.yml) + `4` Singular Tests in [`dbt/tests/`](../dbt/tests/)):**
+  * Enforces primary keys, foreign key `relationships`, `non_negative` revenue/LTV measures, and `accepted_values` on `delivery_status` & `customer_segment`.
+  * Runs 4 singular SQL business invariants: row-level `total_order_cost = total_item_value + total_freight_value`, cross-layer revenue reconciliation (`fct_orders` vs. `stg_order_items`), `delivery_status` / `is_delayed` / `delay_days` consistency, and `customer_segment` vs. `total_orders` alignment.
