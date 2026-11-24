@@ -13,8 +13,8 @@
 | **Repository** | [github.com/AOMINHTAM/aws-data-pipeline](https://github.com/AOMINHTAM/aws-data-pipeline) |
 | **Dataset sử dụng** | Olist Brazilian E-Commerce Dataset (~120MB, ~100k đơn hàng, 9 quan hệ) |
 | **Công nghệ cốt lõi** | AWS (CloudFormation, S3, SQS + DLQ, CloudWatch, SNS, Redshift Serverless, IAM), dbt Core, Apache Airflow 3 (Astro CLI & Astronomer Cosmos), Docker, Python (`redshift-connector`, `boto3`, `pandas`), WSL2 Ubuntu |
-| **Lịch sử hoàn thành** | **V2 (Baseline):** 10/2026 • **V3 (S3 Sensor):** 12/11/2026 • **V4 (`v4.0.1` Event-Driven & Incremental):** 13/11/2026 • **V5 (`5.0.0` CloudFormation IaC, DLQ & Observability):** 18/11/2026 |
-| **Trạng thái** | ✅ **HOÀN THÀNH TOÀN DIỆN & PHÁT HÀNH `5.0.0` (100% ACCEPTED & LIVE VERIFIED)** |
+| **Lịch sử hoàn thành** | **V2 (Baseline):** 10/2026 • **V3 (S3 Sensor):** 12/11/2026 • **V4 (`v4.0.1`):** 13/11/2026 • **V5 (`5.0.0` CloudOps):** 18/11/2026 • **V5 (`5.3.0` Star Schema & 146-Test DQ):** 25/11/2026 |
+| **Trạng thái** | ✅ **HOÀN THÀNH TOÀN DIỆN & PHÁT HÀNH `5.3.0` (Latest — 100% LIVE VERIFIED)** |
 
 ---
 
@@ -45,12 +45,12 @@
 
 ## 📊 KẾT QUẢ ĐẦU RA DỮ LIỆU ĐÃ NGHIỆM THU
 
-Các file dữ liệu thành phẩm đã được trích xuất tại thư mục [`exports/`](../exports/) (git-ignored trên local):
+Các file dữ liệu thành phẩm đã được trích xuất 100% từ tầng Gold [`public_marts`](../scripts/export_to_csv.py) tại [`exports/`](../exports/) (git-ignored trên local — tổng **`341,138` dòng / `49.84 MB`** ở mốc **`5.3.0`**):
 
-1. **`1_master_orders_analytics.csv`** (24.5 MB | 99,441 dòng): Tổng hợp đơn hàng, khách hàng, doanh thu, thời gian giao hàng, độ trễ và review score.
-2. **`2_dim_products.csv`** (3.2 MB | 32,951 dòng): Danh mục sản phẩm đã dịch chuẩn tiếng Anh, kích thước và khối lượng.
-3. **`3_dim_customers.csv`** (15.2 MB | 99,441 dòng): Khách hàng, phân khúc One-time vs Returning, Customer Lifetime Value (LTV).
-4. **`4_order_items_product_sales.csv`** (11.3 MB | 112,650 dòng): Chi tiết từng item bán ra kết nối với sản phẩm.
+1. **`1_master_orders_analytics.csv`** (`24.95 MB` | `99,441` dòng): Tổng hợp đơn hàng, `customer_unique_id`, khách hàng, doanh thu, thời gian giao hàng, độ trễ và review score.
+2. **`2_dim_products.csv`** (`3.10 MB` | `32,951` dòng): Danh mục sản phẩm đã dịch chuẩn tiếng Anh, kích thước và khối lượng.
+3. **`3_dim_customers.csv`** (`10.99 MB` | `96,096` dòng): Dimension khách hàng thật ở đúng grain `customer_unique_id` (hết trùng lặp LTV), phân khúc `One-Time` vs `Returning` và Customer Lifetime Value (LTV).
+4. **`4_order_items_product_sales.csv`** (`10.80 MB` | `112,650` dòng): Chi tiết từng món hàng kết xuất từ Gold `public_marts.fct_order_items` nối `dim_products`.
 
 ---
 
@@ -252,4 +252,8 @@ flowchart TB
 >   - `ensure_non_empty_stage` chặn swap (`ValueError`), rollback giữ nguyên **`71` dòng** trong `raw_data.product_category_name_translation` và ghi `status='FAILED', rows_loaded=0` vào `ops.pipeline_ingestion_audit`.
 >   - Sau `maxReceiveCount=3`, SQS chuyển message sang `olist-v5-s3-raw-arrival-dlq-dev` (`1` message) → CloudWatch Alarms (`dlq-messages-visible`, `backlog-age`, `inflight-sustained`) chuyển Đỏ **`In alarm`** và SNS gửi email cảnh báo thật tới Gmail.
 >   - Sau khi khôi phục CSV hợp lệ và chạy `aws sqs start-message-move-task` (**DLQ Redrive**), DAG Run phục hồi **PASS 17/17 tasks**, `ops.pipeline_ingestion_audit` ghi tiếp `SWAPPED` → `ARCHIVED` → `COMPLETED`, SQS Main & DLQ về `0/0`, và **4/4 CloudWatch Alarms tự quay về Xanh `OK`**.
+
+#### 5. Chuỗi Nâng cấp Hardening, Data Quality & Star Schema (`5.0.1` → `5.3.0`, 18–25/11/2026)
+- **`5.0.1` & `5.0.2`:** Vá 12 nhóm điểm mù (Two-Phase Batch Staging, `validate_csv_header`, fail-closed audit, Safe ACK theo `event_token`, `S3RawBucketPolicy` HTTPS), bổ sung Redshift `DISTKEY`/`SORTKEY`, ghim `VersionId` + `sequencer` (`23/23` Python unit tests), và `SQLFluff` Redshift CI.
+- **`5.2.0` & `5.3.0` (LIVE Verified trên Redshift Serverless, 25/11/2026):** Hoàn thiện **Kimball Star Schema 2 Facts + 2 Dimensions** ([`fct_order_items`](../dbt/models/marts/fct_order_items.sql) + `dim_customers` đúng grain `customer_unique_id` `96,096` dòng) và mở rộng Data Quality lên **`146` dbt tests 3 tầng** (`44` Bronze + `45` Silver + `51` Gold schema + `6` singular đối soát) — **LIVE `dbt build --full-refresh` `PASS=156, WARN=1, ERROR=0`** (`256.03s`) và **incremental `dbt build` `PASS=56, WARN=0, ERROR=0`** (`96.33s`).
 

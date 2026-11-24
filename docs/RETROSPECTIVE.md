@@ -13,8 +13,8 @@
 | **Repository** | [github.com/AOMINHTAM/aws-data-pipeline](https://github.com/AOMINHTAM/aws-data-pipeline) |
 | **Dataset** | Olist Brazilian E-Commerce Dataset (~120 MB, ~100k orders, 9 relational tables) |
 | **Core Stack** | AWS (CloudFormation, S3, SQS + DLQ, CloudWatch, SNS, Redshift Serverless, IAM), dbt Core, Apache Airflow 3 (Astro CLI & Astronomer Cosmos), Docker, Python (`redshift-connector`, `boto3`, `pandas`), Ubuntu WSL2 |
-| **Milestones** | **V2 (Baseline):** Oct 2026 • **V3 (S3 Sensor):** Nov 12, 2026 • **V4 (`v4.0.1` Event-Driven & Incremental):** Nov 13, 2026 • **V5 (`5.0.0` CloudFormation IaC, DLQ & Observability):** Nov 18, 2026 |
-| **Status** | ✅ **100% ACCEPTED, LIVE VERIFIED & RELEASED (`5.0.0`)** |
+| **Milestones** | **V2 (Baseline):** Oct 2026 • **V3 (S3 Sensor):** Nov 12, 2026 • **V4 (`v4.0.1`):** Nov 13, 2026 • **V5 (`5.0.0` CloudOps):** Nov 18, 2026 • **V5 (`5.3.0` Star Schema & 146-Test DQ):** Nov 25, 2026 |
+| **Status** | ✅ **100% ACCEPTED, LIVE VERIFIED & RELEASED (`5.3.0` Latest)** |
 
 ---
 
@@ -45,12 +45,12 @@
 
 ## 📊 VERIFIED OUTPUT DATASETS
 
-Extracted analytical datasets stored locally in [`exports/`](../exports/) (git-ignored):
+Extracted analytical datasets stored locally in [`exports/`](../exports/) (git-ignored, refreshed from `public_marts` in **`5.3.0`** — `341,138` rows / `49.84 MB`):
 
-1. **`1_master_orders_analytics.csv`** (24.5 MB | 99,441 rows): Consolidated order facts, customer attributes, revenue, delivery lead time, SLA delay flags, and review scores.
-2. **`2_dim_products.csv`** (3.2 MB | 32,951 rows): Product catalog with English category translations, dimensions, and weight.
-3. **`3_dim_customers.csv`** (15.2 MB | 99,441 rows): Customer dimension featuring `One-time` vs. `Returning` segmentation and Customer Lifetime Value (LTV).
-4. **`4_order_items_product_sales.csv`** (11.3 MB | 112,650 rows): Line-item level sales details joined with product attributes.
+1. **`1_master_orders_analytics.csv`** (`24.95 MB` | `99,441` rows): Consolidated order facts, `customer_unique_id`, customer attributes, revenue, delivery lead time, SLA delay flags, and review scores.
+2. **`2_dim_products.csv`** (`3.10 MB` | `32,951` rows): Product catalog with English category translations, dimensions, and weight.
+3. **`3_dim_customers.csv`** (`10.99 MB` | `96,096` rows): Deduplicated person-level customer dimension (`customer_unique_id` grain) featuring `One-Time` vs. `Returning` segmentation and additive Customer Lifetime Value (LTV).
+4. **`4_order_items_product_sales.csv`** (`10.80 MB` | `112,650` rows): Line-item level sales details exported directly from Gold `public_marts.fct_order_items` joined with `dim_products`.
 
 ---
 
@@ -224,3 +224,7 @@ flowchart TB
 >   - `ensure_non_empty_stage` aborted swap (`ValueError`), transaction rollback preserved **`71` rows** in `raw_data.product_category_name_translation`, and `ops.pipeline_ingestion_audit` logged `status='FAILED', rows_loaded=0`.
 >   - After `maxReceiveCount=3`, SQS routed the poison message to `olist-v5-s3-raw-arrival-dlq-dev` (`1` message) → CloudWatch Alarms (`dlq-messages-visible`, `backlog-age`, `inflight-sustained`) entered **`ALARM`** and SNS dispatched real email alerts.
 >   - Restored valid CSV and ran `aws sqs start-message-move-task` (**DLQ Redrive**) → recovery DAG run **PASS 17/17 tasks**, `ops.pipeline_ingestion_audit` logged `SWAPPED` → `ARCHIVED` → `COMPLETED`, SQS Main & DLQ cleared to `0/0`, and **all 4/4 CloudWatch Alarms returned to `OK`**.
+
+#### 5. Incremental Hardening & Star Schema Releases (`5.0.1` → `5.3.0`, Nov 18–25, 2026)
+- **`5.0.1` & `5.0.2`:** Closed 12 cross-review edge cases (Two-Phase Batch Staging, `validate_csv_header`, fail-closed audit, cross-run `event_token` Safe ACK, `S3RawBucketPolicy` HTTPS), added Redshift `DISTKEY`/`SORTKEY`, S3 `VersionId` copy & `sequencer` ordering (`23/23` Python unit tests), and `SQLFluff` Redshift CI linting.
+- **`5.2.0` & `5.3.0` (LIVE Verified on Redshift Serverless, Nov 25, 2026):** Completed the **2-Fact / 2-Dimension Kimball Star Schema** ([`fct_order_items`](../dbt/models/marts/fct_order_items.sql) + `dim_customers` at `96,096`-row `customer_unique_id` grain) and expanded dbt Data Quality to **`146` 3-layer tests** (`44` Bronze + `45` Silver + `51` Gold schema + `6` singular reconciliation tests) — **LIVE `dbt build --full-refresh` `PASS=156, WARN=1, ERROR=0`** (`256.03s`) and **incremental `dbt build` `PASS=56, WARN=0, ERROR=0`** (`96.33s`).

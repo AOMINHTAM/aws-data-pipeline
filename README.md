@@ -68,7 +68,7 @@ Raw Olist marketplace feeds arrive across **9 fragmented CSVs** with Portuguese 
 | **Ingestion & Safe ACK** | Static manual `COPY` | Per-table `TEMP TABLE` swap + Empty-Stage Guard | Adds **`ops.pipeline_ingestion_audit`** (`SWAPPED` → `ARCHIVED` → `COMPLETED` / `FAILED`), **deterministic `archive/<audit_id>/`**, and Safe ACK verification (`verify_safe_to_ack_when_raw_missing`). |
 | **IAM & Storage Security** | Single broad IAM setup | `RedshiftS3ReadOnlyRole` (STS) + `.env` | **Split Least-Privilege IAM:** `RedshiftS3ReadOnlyRole` scoped strictly to `raw/*`; `AirflowRuntimePolicy` (no `archive/*` delete); `DlqOperatorPolicy`; **S3 Versioning + Lifecycle + AES256**. |
 | **Observability & Alerting** | Manual log check | GitHub Actions 3-job CI | **4 CloudWatch Alarms** (`DLQ >= 1`, `Age > 600s`, `InFlight >= 1 for 15m`, `Backlog >= 20`) + **`PipelineAlertTopicPolicy`** + **Amazon SNS Email Notifications**. |
-| **Data Modeling (dbt)** | Basic full rebuilds | Incremental `fct_orders` (4-source `affected_order_ids`, `delivery_status`) + LTV `dim_customers` | Preserved Star Schema + paused-by-default weekly full-refresh maintenance DAG + `exports/` CSV decoupling. |
+| **Data Modeling & Quality (dbt)** | Basic full rebuilds | Incremental `fct_orders` (4-source `affected_order_ids`, `delivery_status`) + LTV `dim_customers` | **2-Fact / 2-Dim Star Schema** (`fct_orders`, `fct_order_items`, `customer_unique_id` `dim_customers`, `dim_products`), **Redshift `DISTKEY`/`SORTKEY`**, **`146` 3-layer dbt tests** + `SQLFluff` CI + `100% Gold` `exports/`. |
 
 ---
 

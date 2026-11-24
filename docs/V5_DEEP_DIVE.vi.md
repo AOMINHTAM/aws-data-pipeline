@@ -98,6 +98,9 @@ stateDiagram-v2
 | **Amazon S3 (Versioning)** | Trả phí theo GB lưu trữ (\$0.023/GB/tháng) | ~120 MB $\approx$ **\$0.003/tháng** (Lifecycle tự dọn old versions sau 30 ngày) |
 | **Redshift Serverless (4 RPUs)** | Tính theo RPU-giây khi thức + Storage (\$0.024/GB/tháng) | Ngủ **\$0.00 compute** khi idle; chỉ thức ~1–3 phút khi có batch CSV |
 
-### Các giới hạn / Trade-offs giữ nguyên có chủ đích ở V5
-- **Per-table Atomicity & Snapshot Contract:** `parse_sqs_s3_events` gom nhóm theo `filename` (mỗi bảng đích 1 snapshot file mỗi batch) và `load_raw_from_sqs` commit độc lập theo từng bảng — nếu có batch nhiều file lỗi ở file thứ 3, các file đã commit vẫn an toàn nhưng toàn bộ message batch chưa ACK có thể bị retry chung (*batch failure coupling*, hướng mở rộng V6 là per-message state machine / DynamoDB conditional lock).
-- **Môi trường dev local:** Stack CloudFormation đã tạo và gắn `AirflowRuntimePolicy` & `DlqOperatorPolicy` chuẩn Least Privilege vào `de-ecommerce-dev`, nhưng user dev này vẫn đang giữ các Managed Policy rộng từ V2–V4 để tiện chạy CloudFormation deploy từ máy cá nhân.
+### Các nâng cấp mới (`5.0.2` – `5.3.0`) & Giới hạn giữ nguyên có chủ đích
+- **Đã nâng cấp từ `5.0.2` → `5.3.0` (đã verify trên CI & LIVE Redshift Serverless):**
+  - **S3 `VersionId` & `sequencer` (`5.0.2`):** `build_s3_copy_source()` ghim `VersionId` khi archive ở Task 3 và `_is_newer_s3_event()` so sánh hex `sequencer` chống SQS giao lệch thứ tự (`23/23` unit tests PASS).
+  - **Physical Design & `SQLFluff` (`5.0.2`–`5.2.0`):** Gắn `DISTKEY`/`SORTKEY` cho toàn bộ Gold marts và mở rộng `SQLFluff` kiểm tra `dbt/models/` + `dbt/tests/*.sql`.
+  - **Data Quality 3 tầng & Star Schema 2 Facts + 2 Dims (`5.2.0`–`5.3.0`):** Thêm `fct_order_items`, đưa `dim_customers` về đúng grain `customer_unique_id` (`96,096` dòng chống nhân đôi LTV), nâng tổng số kiểm thử lên **`146` dbt tests** (`44` Bronze + `45` Silver + `51` Gold schema + `6` singular đối soát) — đã **LIVE verify** trên Redshift Serverless (`PASS=156, WARN=1, ERROR=0` full-refresh; `PASS=56, WARN=0, ERROR=0` incremental).
+- **Giới hạn vẫn giữ nguyên cho V6:** `parse_sqs_s3_events` gom nhóm theo `filename` (single-snapshot contract), `load_raw_from_sqs` commit theo từng bảng đích, và user dev local `de-ecommerce-dev` vẫn giữ thêm policy rộng từ V2–V4 để chạy CloudFormation deploy từ máy cá nhân.
