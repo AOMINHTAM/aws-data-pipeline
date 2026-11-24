@@ -88,7 +88,7 @@ QUERIES = {
             SELECT
                 o.order_id,
                 o.customer_id,
-                c.customer_unique_id,
+                o.customer_unique_id,
                 c.city AS customer_city,
                 c.state AS customer_state,
                 c.customer_segment,
@@ -111,7 +111,7 @@ QUERIES = {
                 o.review_score
             FROM public_marts.fct_orders o
             LEFT JOIN public_marts.dim_customers c
-                ON o.customer_id = c.customer_id
+                ON o.customer_unique_id = c.customer_unique_id
             ORDER BY o.order_purchase_timestamp DESC;
         """
     },
@@ -134,10 +134,12 @@ QUERIES = {
         """
     },
     "3_dim_customers.csv": {
-        "description": "Khách hàng & Giá trị vòng đời (LTV, số lượng đơn, phân khúc)",
+        "description": (
+            "Khách hàng thật (grain customer_unique_id, không trùng LTV, "
+            "phân khúc One-time/Returning)"
+        ),
         "sql": """
             SELECT
-                customer_id,
                 customer_unique_id,
                 city,
                 state,
@@ -152,7 +154,10 @@ QUERIES = {
         """
     },
     "4_order_items_product_sales.csv": {
-        "description": "Chi tiết từng item trong đơn hàng kèm tên danh mục sản phẩm",
+        "description": (
+            "Chi tiết từng item trong đơn hàng từ tầng Gold "
+            "(fct_order_items + dim_products)"
+        ),
         "sql": """
             SELECT
                 oi.order_id,
@@ -162,7 +167,7 @@ QUERIES = {
                 oi.price,
                 oi.freight_value,
                 oi.total_item_value
-            FROM public_staging.stg_order_items oi
+            FROM public_marts.fct_order_items oi
             LEFT JOIN public_marts.dim_products p
                 ON oi.product_id = p.product_id;
         """

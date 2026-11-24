@@ -33,31 +33,32 @@ Pipeline này giải quyết trọn vẹn các vấn đề trên bằng cách bi
 
 ## 3. Tầng Dữ liệu Phân tích & Đầu ra cho BI
 
-### 3.1. Mô hình Kimball Star Schema (`public_marts`)
+### 3.1. Mô hình Kimball Star Schema (`public_marts` — 2 Facts + 2 Dimensions)
 1. **[`fct_orders`](../dbt/models/marts/fct_orders.sql)** *(Incremental Fact — `unique_key: order_id`, `delete+insert`)*
-   * **Độ mịn (Grain):** 1 dòng = 1 đơn hàng (`order_id`).
-   * **Đảm bảo số liệu luôn đúng khi chạy Incremental:** CTE `affected_order_ids` quét thay đổi từ **cả 4 bảng nguồn** (`stg_orders`, `stg_order_items`, `stg_payments`, `stg_reviews`), nhờ đó các đơn hàng cũ mới được giao xong, mới cập nhật thanh toán hoặc mới có đánh giá sao đều tự động đồng bộ vào Fact mà không cần dựng lại toàn bảng.
-2. **[`dim_customers`](../dbt/models/marts/dim_customers.sql)** *(Incremental Dimension — `unique_key: customer_id`, `delete+insert`)*
-   * **Độ mịn (Grain):** 1 dòng = 1 `customer_id` theo đơn, được làm giàu bằng **chỉ số trọn đời cấp độ khách thật (`customer_unique_id`)**.
-   * **Bảo toàn LTV khi chạy Incremental:** Khi phát hiện `customer_unique_id` có đơn mới (lookback 3 ngày), `customer_id` mới hoặc thay đổi `lifetime_spend`/`total_orders`/địa chỉ, model tự động gom lại toàn bộ lịch sử đơn của đúng khách đó trước khi `delete+insert` để LTV và nhãn `Returning Customer` không bao giờ bị lệch.
-3. **[`dim_products`](../dbt/models/marts/dim_products.sql)** *(Dimension Table)*
-   * **Độ mịn (Grain):** 1 dòng = 1 mã sản phẩm (`product_id`) kèm `category_name` tiếng Anh, tên gốc tiếng Bồ Đào Nha, số lượng ảnh (`product_photos_qty`), khối lượng và kích thước đóng gói.
+   * **Độ mịn (Grain):** 1 dòng = 1 đơn hàng (`order_id`, `99,441` dòng), gắn khóa ngoại `customer_unique_id` (`N:1`) nối tới `dim_customers`.
+   * **Đảm bảo số liệu luôn đúng khi chạy Incremental:** CTE `affected_order_ids` quét thay đổi từ các bảng nguồn (`stg_orders`, `stg_customers`, `stg_order_items`, `stg_payments`, `stg_reviews`), giúp các đơn hàng cũ mới giao xong, mới cập nhật thanh toán hoặc mới có đánh giá sao tự động đồng bộ vào Fact.
+2. **[`fct_order_items`](../dbt/models/marts/fct_order_items.sql)** *(Incremental Line-Item Fact — `unique_key: order_item_key`, `delete+insert`)*
+   * **Độ mịn (Grain):** 1 dòng = 1 món hàng trong đơn (`(order_id, order_item_id)`, `112,650` dòng), kết nối trực tiếp `fct_orders`, `dim_customers` và `dim_products` ngay ở tầng Gold để BI không phải truy vấn ngược về tầng Silver.
+3. **[`dim_customers`](../dbt/models/marts/dim_customers.sql)** *(Incremental Dimension — `unique_key: customer_unique_id`, `delete+insert`)*
+   * **Độ mịn (Grain):** 1 dòng = 1 khách hàng thật (`customer_unique_id`, **`96,096` dòng**), chọn địa chỉ của đơn hàng gần nhất qua `row_number()` và xóa bỏ hoàn toàn bẫy nhân đôi LTV trên BI (`SUM(lifetime_spend) == SUM(fct_orders.total_payment_value)`).
+4. **[`dim_products`](../dbt/models/marts/dim_products.sql)** *(Dimension Table — `DISTSTYLE ALL`)*
+   * **Độ mịn (Grain):** 1 dòng = 1 mã sản phẩm (`product_id`, `32,951` dòng) kèm `category_name` tiếng Anh, tên gốc tiếng Bồ Đào Nha, số lượng ảnh (`product_photos_qty`), khối lượng và kích thước đóng gói.
 
-### 3.2. Bộ 4 File CSV Sạch Phục vụ BI ([`scripts/export_to_csv.py`](../scripts/export_to_csv.py) → `exports/`)
-Để Power BI và các công cụ phân tích offline chạy mượt mà với **chi phí `$0` Redshift RPU nhàn rỗi**, script xuất sẵn 4 bộ dataset chuẩn hóa:
+### 3.2. Bộ 4 File CSV Sạch Phục vụ BI ([`scripts/export_to_csv.py`](../scripts/export_to_csv.py) → `exports/` — 100% Tầng Gold)
+Để Power BI và các công cụ phân tích offline chạy mượt mà với **chi phí `$0` Redshift RPU nhàn rỗi**, script xuất sẵn 4 bộ dataset chuẩn hóa (`341,138` dòng / `49.84 MB`) hoàn toàn từ tầng `public_marts`:
 
-| Tên file xuất | Nguồn từ Redshift | Bài toán phân tích phục vụ |
+| Tên file xuất | Nguồn từ tầng Gold (`public_marts`) | Bài toán phân tích phục vụ |
 | :--- | :--- | :--- |
-| **`1_master_orders_analytics.csv`** | `public_marts.fct_orders` + `dim_customers` | Dashboard điều hành (GMV, tiền thực thu, số đơn, AOV), phân bố đơn theo `customer_state`/`city`, tỷ lệ giao đúng hạn (`delivery_status`), và tương quan giữa giao trễ với `review_score`. |
-| **`2_dim_products.csv`** | `public_marts.dim_products` | Lọc theo ngành hàng tiếng Anh, phân tích đặc tính vật lý sản phẩm (khối lượng/kích thước ảnh hưởng chi phí vận chuyển) và chất lượng hiển thị (số ảnh, độ dài mô tả). |
-| **`3_dim_customers.csv`** | `public_marts.dim_customers` | Phân tích chân dung khách hàng (`One-Time Customer` vs. `Returning Customer`), cohort giữ chân khách (`first_order_date` vs. `most_recent_order_date`), và phân tích Pareto nhóm khách hàng LTV cao. |
-| **`4_order_items_product_sales.csv`** | `public_staging.stg_order_items` + `dim_products` | Phân tích doanh thu thuần và phí vận chuyển chi tiết tới từng món hàng theo `category_name`, số lượng món trung bình mỗi đơn và top ngành hàng/SKU bán chạy. |
+| **`1_master_orders_analytics.csv`** | `public_marts.fct_orders` + `dim_customers` | Dashboard điều hành (GMV, tiền thực thu, số đơn, AOV), phân bố đơn theo `customer_state`/`city`, tỷ lệ giao đúng hạn (`delivery_status`), và tương quan giữa giao trễ với `review_score` (`99,441` dòng). |
+| **`2_dim_products.csv`** | `public_marts.dim_products` | Lọc theo ngành hàng tiếng Anh, phân tích đặc tính vật lý sản phẩm (khối lượng/kích thước ảnh hưởng chi phí vận chuyển) và chất lượng hiển thị (số ảnh, độ dài mô tả) (`32,951` dòng). |
+| **`3_dim_customers.csv`** | `public_marts.dim_customers` | Phân tích chân dung khách hàng không trùng lặp (`One-Time Customer` vs. `Returning Customer`), cohort giữ chân khách và Pareto nhóm LTV cao (**`96,096` khách hàng thật**, cộng thẳng `SUM(lifetime_spend)` không lệch). |
+| **`4_order_items_product_sales.csv`** | `public_marts.fct_order_items` + `dim_products` | Phân tích doanh thu thuần và phí vận chuyển chi tiết tới từng món hàng theo `category_name`, số lượng món trung bình mỗi đơn và top ngành hàng/SKU bán chạy (`112,650` dòng). |
 
 ---
 
 ## 4. Hợp đồng Chất lượng Dữ liệu Bảo vệ Chỉ số Kinh doanh
 
-Mỗi con số kinh doanh trước khi tới tay người dùng cuối đều được bảo vệ qua **lớp nạp Python + toàn bộ 3 tầng Medallion (`124` dbt tests)**:
+Mỗi con số kinh doanh trước khi tới tay người dùng cuối đều được bảo vệ qua **lớp nạp Python + toàn bộ 3 tầng Medallion (`146` dbt tests đã LIVE-verify trên Redshift Serverless: `PASS=156, WARN=1, ERROR=0` full-refresh; `PASS=56, WARN=0, ERROR=0` incremental)**:
 
 * **Lớp Bảo vệ Tầng Nạp (Trước khi ghi vào DWH):**
   * [`validate_csv_header`](../include/ingestion_guards.py) phát hiện sớm sai lệch schema/header của file CSV nguồn trước khi nạp vào Redshift.
@@ -65,7 +66,7 @@ Mỗi con số kinh doanh trước khi tới tay người dùng cuối đều đ
 * **Lớp Kiểm thử Tầng Bronze / Raw (`44` Tests trong [`dbt/models/staging/sources.yml`](../dbt/models/staging/sources.yml)):**
   * Khóa chặt tính duy nhất đơn & tổ hợp (`order_id`, `[order_id, order_item_id]`, `[order_id, payment_sequential]`, `[review_id, order_id]`, `customer_id`, `product_id`, `seller_id`), giá trị không âm (`non_negative`), và tập giá trị hợp lệ (`order_status`, `payment_type`, `review_score` `1–5`) ngay tại nguồn trước khi chạy Silver/Gold.
 * **Lớp Kiểm thử Tầng Silver / Staging (`45` Tests trong [`dbt/models/staging/schema.yml`](../dbt/models/staging/schema.yml)):**
-  * Kiểm tra hợp đồng đầu ra của 7 views chuẩn hóa, `non_negative` trên `total_item_value`, toàn vẹn tham chiếu (`relationships`) giữa đơn hàng, món hàng, thanh toán, đánh giá, khách hàng, sản phẩm, và cảnh báo `severity: warn` cho nhóm sản phẩm chưa có bản dịch danh mục.
-* **Lớp Kiểm thử Tầng Gold / Marts & Đối soát Chéo tầng (`31` Schema Tests trong [`dbt/models/marts/schema.yml`](../dbt/models/marts/schema.yml) + `4` Singular Tests trong [`dbt/tests/`](../dbt/tests/)):**
-  * Khóa chính, khóa ngoại, các chỉ số doanh thu/LTV `non_negative`, và `accepted_values` cho `delivery_status` & `customer_segment`.
-  * 4 singular tests đối soát nghiệp vụ: phương trình `total_order_cost = total_item_value + total_freight_value`, khớp tổng doanh thu `fct_orders` với `stg_order_items` chống sai lệch incremental, tính nhất quán `delivery_status` / `is_delayed` / `delay_days`, và khớp `customer_segment` với `total_orders`.
+  * Kiểm tra hợp đồng đầu ra của 7 views chuẩn hóa, `non_negative` trên `total_item_value`, toàn vẹn tham chiếu (`relationships`) giữa đơn hàng, món hàng, thanh toán, đánh giá, khách hàng, sản phẩm, và cảnh báo `severity: warn` cho `623` dòng sản phẩm trống/chưa dịch danh mục.
+* **Lớp Kiểm thử Tầng Gold / Marts & Đối soát Chéo tầng (`51` Schema Tests trong [`dbt/models/marts/schema.yml`](../dbt/models/marts/schema.yml) + `6` Singular Tests trong [`dbt/tests/`](../dbt/tests/)):**
+  * Khóa chính đơn & tổ hợp, khóa ngoại Star Schema (`fct_orders` & `fct_order_items` → `dim_customers`, `dim_products`), các chỉ số doanh thu/LTV `non_negative`, và `accepted_values` cho `delivery_status` & `customer_segment`.
+  * 6 singular tests đối soát nghiệp vụ: phương trình `total_order_cost = total_item_value + total_freight_value`, khớp doanh thu Silver ↔ Gold (`fct_orders` vs `stg_order_items`), đối soát 2 bảng Fact (`fct_order_items` vs `fct_orders`), đối soát LTV không nhân đôi (`dim_customers.lifetime_spend` vs `fct_orders.total_payment_value`), tính nhất quán `delivery_status` / `is_delayed` / `delay_days`, và khớp `customer_segment` với `total_orders`.

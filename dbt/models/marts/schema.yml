@@ -2,7 +2,7 @@ version: 2
 
 models:
   - name: fct_orders
-    description: "Bảng Fact chính lưu trữ toàn bộ đơn hàng kèm các chỉ số doanh thu, vận chuyển và đánh giá"
+    description: "Bảng Fact cấp đơn hàng (1 dòng = 1 order_id) kèm doanh thu, thanh toán, SLA vận chuyển và điểm đánh giá"
     columns:
       - name: order_id
         description: "Khóa chính (Primary Key) của đơn hàng"
@@ -10,13 +10,17 @@ models:
           - unique
           - not_null
       - name: customer_id
-        description: "Khóa ngoại liên kết với bảng dim_customers"
+        description: "Mã khách theo đơn từ hệ thống nguồn Olist (degenerate source key)"
+        data_tests:
+          - not_null
+      - name: customer_unique_id
+        description: "Khóa ngoại (N:1) liên kết tới khách hàng thật trong bảng dim_customers"
         data_tests:
           - not_null
           - relationships:
               arguments:
                 to: ref('dim_customers')
-                field: customer_id
+                field: customer_unique_id
       - name: order_status
         description: "Trạng thái hiện tại của đơn hàng"
         data_tests:
@@ -60,16 +64,86 @@ models:
               arguments:
                 values: ['Pending Delivery', 'Delayed', 'On Time']
 
-  - name: dim_customers
-    description: "Bảng Dimension lưu trữ thông tin khách hàng, phân khúc và tổng chi tiêu trọn đời (LTV)"
+  - name: fct_order_items
+    description: "Bảng Fact cấp chi tiết món hàng (1 dòng = 1 order_id + order_item_id) nối trực tiếp dim_products, fct_orders và dim_customers"
+    data_tests:
+      - composite_unique:
+          arguments:
+            combination_of_columns:
+              - order_id
+              - order_item_id
     columns:
-      - name: customer_id
-        description: "Khóa chính của khách hàng cho mỗi đơn"
+      - name: order_item_key
+        description: "Khóa đại diện duy nhất (order_id-order_item_id) cho chiến lược incremental delete+insert"
         data_tests:
           - unique
           - not_null
+      - name: order_id
+        description: "Khóa ngoại (N:1) liên kết tới bảng fct_orders"
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('fct_orders')
+                field: order_id
+      - name: order_item_id
+        description: "Số thứ tự món hàng trong đơn"
+        data_tests:
+          - not_null
       - name: customer_unique_id
-        description: "Định danh duy nhất của mỗi người dùng thật"
+        description: "Khóa ngoại (N:1) liên kết tới bảng dim_customers"
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_customers')
+                field: customer_unique_id
+      - name: product_id
+        description: "Khóa ngoại (N:1) liên kết tới bảng dim_products"
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_products')
+                field: product_id
+      - name: seller_id
+        description: "Mã người bán"
+        data_tests:
+          - not_null
+      - name: order_status
+        description: "Trạng thái hiện tại của đơn hàng"
+        data_tests:
+          - not_null
+      - name: order_purchase_timestamp
+        description: "Thời điểm đặt hàng"
+        data_tests:
+          - not_null
+      - name: price
+        description: "Giá bán món hàng (chưa gồm phí vận chuyển)"
+        data_tests:
+          - not_null
+          - non_negative
+      - name: freight_value
+        description: "Phí vận chuyển phân bổ cho món hàng"
+        data_tests:
+          - not_null
+          - non_negative
+      - name: total_item_value
+        description: "Tổng giá trị món hàng (price + freight_value)"
+        data_tests:
+          - not_null
+          - non_negative
+
+  - name: dim_customers
+    description: "Bảng Dimension khách hàng thật (1 dòng = 1 customer_unique_id, loại bỏ hoàn toàn bẫy nhân đôi LTV)"
+    columns:
+      - name: customer_unique_id
+        description: "Khóa chính — định danh duy nhất của mỗi khách hàng thật"
+        data_tests:
+          - unique
+          - not_null
+      - name: state
+        description: "Bang của khách hàng ở đơn hàng gần nhất"
         data_tests:
           - not_null
       - name: total_orders

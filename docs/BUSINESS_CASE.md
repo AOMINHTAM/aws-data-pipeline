@@ -33,31 +33,32 @@ This pipeline transforms those raw feeds into a **governed, event-driven Kimball
 
 ## 3. Analytical Marts & BI Consumption Contract
 
-### 3.1. Kimball Star Schema (`public_marts`)
+### 3.1. Kimball Star Schema (`public_marts` — 2 Facts + 2 Dimensions)
 1. **[`fct_orders`](../dbt/models/marts/fct_orders.sql)** *(Incremental Fact — `unique_key: order_id`, `delete+insert`)*
-   * **Business Grain:** 1 row per order (`order_id`).
-   * **Incremental Accuracy Guarantee:** Uses an `affected_order_ids` union across all **4 upstream sources** (`stg_orders`, `stg_order_items`, `stg_payments`, `stg_reviews`) so late deliveries, delayed payment settlements, or newly posted customer reviews on older orders are automatically reconciled without rebuilding the entire table.
-2. **[`dim_customers`](../dbt/models/marts/dim_customers.sql)** *(Incremental Dimension — `unique_key: customer_id`, `delete+insert`)*
-   * **Business Grain:** 1 row per order-level `customer_id`, enriched with **person-level (`customer_unique_id`) lifetime metrics**.
-   * **Incremental LTV Guarantee:** Identifies affected `customer_unique_id`s (new orders within 3-day lookback, new `customer_id`s, or changed `lifetime_spend`/`total_orders`/address) and recomputes their complete historical spend so `Returning Customer` flags and LTV never drift.
-3. **[`dim_products`](../dbt/models/marts/dim_products.sql)** *(Dimension Table)*
-   * **Business Grain:** 1 row per `product_id` with translated English `category_name`, original Portuguese name, listing metadata (`product_photos_qty`), and shipping dimensions.
+   * **Business Grain:** 1 row per order (`order_id`, `99,441` rows), with `customer_unique_id` foreign key (`N:1`) to `dim_customers`.
+   * **Incremental Accuracy Guarantee:** Uses an `affected_order_ids` union across upstream sources (`stg_orders`, `stg_customers`, `stg_order_items`, `stg_payments`, `stg_reviews`) so late deliveries, delayed payment settlements, or newly posted customer reviews on older orders reconcile automatically.
+2. **[`fct_order_items`](../dbt/models/marts/fct_order_items.sql)** *(Incremental Line-Item Fact — `unique_key: order_item_key`, `delete+insert`)*
+   * **Business Grain:** 1 row per order line item (`(order_id, order_item_id)`, `112,650` rows), linking `fct_orders`, `dim_customers`, and `dim_products` directly inside the Gold layer so BI never queries Silver views directly.
+3. **[`dim_customers`](../dbt/models/marts/dim_customers.sql)** *(Incremental Dimension — `unique_key: customer_unique_id`, `delete+insert`)*
+   * **Business Grain:** 1 row per real unique buyer (`customer_unique_id`, **`96,096` rows**), resolving returning-buyer address changes via most-recent order (`row_number()`). Eliminates LTV double-counting (`SUM(lifetime_spend) == SUM(fct_orders.total_payment_value)`).
+4. **[`dim_products`](../dbt/models/marts/dim_products.sql)** *(Dimension Table — `DISTSTYLE ALL`)*
+   * **Business Grain:** 1 row per `product_id` (`32,951` rows) with translated English `category_name`, original Portuguese name, listing metadata (`product_photos_qty`), and shipping dimensions.
 
-### 3.2. Decoupled BI Datasets (`scripts/export_to_csv.py` → `exports/`)
-To keep Power BI / offline analytics fast with **$0 idle Redshift RPU cost**, [`scripts/export_to_csv.py`](../scripts/export_to_csv.py) materializes four clean analytical CSVs:
+### 3.2. Decoupled BI Datasets (`scripts/export_to_csv.py` → `exports/` — 100% Gold Layer)
+To keep Power BI / offline analytics fast with **$0 idle Redshift RPU cost**, [`scripts/export_to_csv.py`](../scripts/export_to_csv.py) materializes four clean analytical CSVs (`341,138` rows / `49.84 MB`) exclusively from `public_marts`:
 
-| Exported File | Source Marts / Views | Primary Business Use Cases |
+| Exported File | Source Gold Marts | Primary Business Use Cases |
 | :--- | :--- | :--- |
-| **`1_master_orders_analytics.csv`** | `public_marts.fct_orders` + `dim_customers` | Executive KPI scorecards (GMV, cash collected, order volume, AOV), regional demand by `customer_state`/`city`, Delivery SLA compliance (`delivery_status`), and delay-vs-`review_score` correlation. |
-| **`2_dim_products.csv`** | `public_marts.dim_products` | Category hierarchy filtering, SKU catalog profiling (weight & dimensions for freight optimization, photo/description completeness). |
-| **`3_dim_customers.csv`** | `public_marts.dim_customers` | Customer segmentation (`One-Time Customer` vs. `Returning Customer`), cohort retention (`first_order_date` vs. `most_recent_order_date`), and top-LTV Pareto analysis. |
-| **`4_order_items_product_sales.csv`** | `public_staging.stg_order_items` + `dim_products` | Line-item revenue & freight breakdown by English `category_name`, basket size analysis, and top-performing SKUs/categories. |
+| **`1_master_orders_analytics.csv`** | `public_marts.fct_orders` + `dim_customers` | Executive KPI scorecards (GMV, cash collected, order volume, AOV), regional demand by `customer_state`/`city`, Delivery SLA compliance (`delivery_status`), and delay-vs-`review_score` correlation (`99,441` rows). |
+| **`2_dim_products.csv`** | `public_marts.dim_products` | Category hierarchy filtering, SKU catalog profiling (weight & dimensions for freight optimization, photo/description completeness) (`32,951` rows). |
+| **`3_dim_customers.csv`** | `public_marts.dim_customers` | Deduplicated customer segmentation (`One-Time Customer` vs. `Returning Customer`), cohort retention (`first_order_date` vs. `most_recent_order_date`), and additive LTV Pareto analysis (**`96,096` unique customers**, zero LTV fan-out). |
+| **`4_order_items_product_sales.csv`** | `public_marts.fct_order_items` + `dim_products` | Line-item revenue & freight breakdown by English `category_name`, basket size analysis, and top-performing SKUs/categories (`112,650` rows). |
 
 ---
 
 ## 4. Data Quality Contracts Protecting Business KPIs
 
-Every business metric exported to stakeholders is guarded across **ingestion + all 3 Medallion layers (`124` compiled dbt tests)** before reaching `exports/` or BI dashboards:
+Every business metric exported to stakeholders is guarded across **ingestion + all 3 Medallion layers (`146` LIVE-verified dbt tests on Redshift Serverless: `PASS=156, WARN=1, ERROR=0` full-refresh; `PASS=56, WARN=0, ERROR=0` incremental)** before reaching `exports/` or BI dashboards:
 
 * **Ingestion & Schema Contracts (Before DWH Swap):**
   * [`validate_csv_header`](../include/ingestion_guards.py) blocks upstream schema drift before loading Redshift.
@@ -65,7 +66,7 @@ Every business metric exported to stakeholders is guarded across **ingestion + a
 * **Bronze / Raw Source Tests (`44` Tests in [`dbt/models/staging/sources.yml`](../dbt/models/staging/sources.yml)):**
   * Enforces primary and composite uniqueness (`order_id`, `[order_id, order_item_id]`, `[order_id, payment_sequential]`, `[review_id, order_id]`, `customer_id`, `product_id`, `seller_id`), `non_negative` financial/weight checks, and `accepted_values` for `order_status`, `payment_type`, and `review_score` (`1–5`) before downstream models execute.
 * **Silver / Staging Contract Tests (`45` Tests in [`dbt/models/staging/schema.yml`](../dbt/models/staging/schema.yml)):**
-  * Validates standardized view schemas, `non_negative` derived `total_item_value`, strict referential integrity (`relationships`) across orders, items, payments, reviews, customers, and products, and `severity: warn` monitoring on untranslated product categories.
-* **Gold / Marts & Cross-Layer Reconciliation (`31` Schema Tests in [`dbt/models/marts/schema.yml`](../dbt/models/marts/schema.yml) + `4` Singular Tests in [`dbt/tests/`](../dbt/tests/)):**
-  * Enforces primary keys, foreign key `relationships`, `non_negative` revenue/LTV measures, and `accepted_values` on `delivery_status` & `customer_segment`.
-  * Runs 4 singular SQL business invariants: row-level `total_order_cost = total_item_value + total_freight_value`, cross-layer revenue reconciliation (`fct_orders` vs. `stg_order_items`), `delivery_status` / `is_delayed` / `delay_days` consistency, and `customer_segment` vs. `total_orders` alignment.
+  * Validates standardized view schemas, `non_negative` derived `total_item_value`, strict referential integrity (`relationships`) across orders, items, payments, reviews, customers, and products, and `severity: warn` monitoring on `623` blank/untranslated Olist product categories.
+* **Gold / Marts & Cross-Layer Reconciliation (`51` Schema Tests in [`dbt/models/marts/schema.yml`](../dbt/models/marts/schema.yml) + `6` Singular Tests in [`dbt/tests/`](../dbt/tests/)):**
+  * Enforces primary/composite keys, Star Schema foreign keys (`fct_orders` & `fct_order_items` → `dim_customers`, `dim_products`), `non_negative` revenue/LTV measures, and `accepted_values` on `delivery_status` & `customer_segment`.
+  * Runs 6 singular SQL invariants: row-level `total_order_cost = total_item_value + total_freight_value`, Silver-to-Gold revenue reconciliation (`fct_orders` vs. `stg_order_items`), Fact-to-Fact reconciliation (`fct_order_items` vs. `fct_orders`), LTV additivity reconciliation (`dim_customers.lifetime_spend` vs. `fct_orders.total_payment_value`), `delivery_status` / `is_delayed` / `delay_days` consistency, and `customer_segment` vs. `total_orders` alignment.

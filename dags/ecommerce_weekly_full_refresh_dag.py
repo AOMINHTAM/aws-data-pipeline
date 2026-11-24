@@ -40,7 +40,7 @@ with DAG(
         task_id="dbt_full_refresh_incremental_marts",
         bash_command=(
             "dbt build --full-refresh "
-            "--select fct_orders dim_customers "
+            "--select fct_orders fct_order_items dim_customers "
             f'--project-dir "{DBT_PROJECT_PATH}" '
             f'--profiles-dir "{DBT_PROFILES_PATH}"'
         ),

@@ -1,6 +1,5 @@
--- Kiểm tra tính nhất quán giữa total_orders và customer_segment trong dim_customers
+-- Kiểm tra tính nhất quán giữa total_orders và customer_segment trong dim_customers (grain customer_unique_id)
 select
-    customer_id,
     customer_unique_id,
     total_orders,
     customer_segment

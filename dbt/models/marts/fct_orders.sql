@@ -4,12 +4,19 @@
         unique_key='order_id',
         incremental_strategy='delete+insert',
         on_schema_change='sync_all_columns',
-        dist='customer_id',
+        dist='customer_unique_id',
         sort=['order_purchase_timestamp', 'order_status']
     )
 }}
 
-with order_items_agg as (
+with customers as (
+    select
+        customer_id,
+        customer_unique_id
+    from {{ ref('stg_customers') }}
+),
+
+order_items_agg as (
     select
         oi.order_id,
         count(oi.order_item_id) as total_items,
@@ -66,12 +73,14 @@ reviews_agg as (
 ),
 
 {% if is_incremental() %}
--- Tập hợp toàn bộ order_id bị ảnh hưởng từ cả 4 nguồn upstream (orders, items, payments, reviews)
+-- Tập hợp toàn bộ order_id bị ảnh hưởng từ các nguồn upstream (orders, customers, items, payments, reviews)
 -- để đảm bảo thay đổi ở bảng con (kể cả đơn cũ > 3 ngày) vẫn được cập nhật vào fct_orders.
 affected_order_ids as (
-    -- 1. Đơn hàng mới, đơn trong lookback 3 ngày (mua/giao), hoặc đơn có thay đổi trạng thái/mốc giao
+    -- 1. Đơn hàng mới, đơn trong lookback 3 ngày (mua/giao), hoặc đơn thay đổi trạng thái/mốc giao/khách
     select o.order_id
     from {{ ref('stg_orders') }} o
+    left join customers c
+        on o.customer_id = c.customer_id
     left join {{ this }} t
         on o.order_id = t.order_id
     where
@@ -84,6 +93,7 @@ affected_order_ids as (
             select dateadd(day, -3, coalesce(max(tgt.order_delivered_customer_date), cast('2016-01-01' as timestamp)))
             from {{ this }} tgt
         )
+        or coalesce(c.customer_unique_id, '') <> coalesce(t.customer_unique_id, '')
         or coalesce(o.order_status, '') <> coalesce(t.order_status, '')
         or coalesce(o.order_approved_at, cast('1900-01-01' as timestamp))
         <> coalesce(t.order_approved_at, cast('1900-01-01' as timestamp))
@@ -149,6 +159,7 @@ final as (
     select
         o.order_id,
         o.customer_id,
+        c.customer_unique_id,
         o.order_status,
         o.order_purchase_timestamp,
         o.order_approved_at,
@@ -183,6 +194,7 @@ final as (
         r.review_score
 
     from orders o
+    left join customers c on o.customer_id = c.customer_id
     left join order_items_agg i on o.order_id = i.order_id
     left join payments_agg p on o.order_id = p.order_id
     left join reviews_agg r on o.order_id = r.order_id

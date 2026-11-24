@@ -1,14 +1,16 @@
 {{
     config(
         materialized='incremental',
-        unique_key='customer_id',
+        unique_key='customer_unique_id',
         incremental_strategy='delete+insert',
         on_schema_change='sync_all_columns',
-        dist='customer_id',
+        dist='customer_unique_id',
         sort=['customer_unique_id', 'most_recent_order_date']
     )
 }}
 
+-- Grain chuẩn Kimball: 1 dòng = 1 khách hàng thật (customer_unique_id)
+-- Xóa bỏ hoàn toàn bẫy nhân đôi lifetime_spend khi SUM() trên BI cho khách quay lại.
 with customers as (
     select * from {{ ref('stg_customers') }}
 ),
@@ -25,121 +27,123 @@ payments_by_order as (
     group by p.order_id
 ),
 
-{% if is_incremental() %}
-current_customer_metrics as (
+customer_order_history as (
     select
         c.customer_unique_id,
-        count(distinct o.order_id) as total_orders,
-        coalesce(sum(p.total_payment), 0) as lifetime_spend
+        c.city,
+        c.state,
+        c.zip_code,
+        o.order_id,
+        o.order_purchase_timestamp,
+        coalesce(p.total_payment, 0) as order_payment_value
     from customers c
     inner join orders o
         on c.customer_id = o.customer_id
     left join payments_by_order p
         on o.order_id = p.order_id
-    group by c.customer_unique_id
 ),
 
--- 1. Xác định tập customer_unique_id bị ảnh hưởng:
---    a) Có phát sinh đơn mới trong lookback window 3 ngày,
---    b) Có customer_id mới chưa tồn tại trong bảng đích {{ this }}, HOẶC
---    c) Có thay đổi tổng chi tiêu (lifetime_spend), tổng số đơn (total_orders) hoặc địa chỉ (city/state/zip_code)
---       kể cả khi cập nhật thanh toán trễ (late-arriving payment) trên đơn hàng cũ > 3 ngày!
+latest_address_ranked as (
+    -- Với 252 khách quay lại có thay đổi địa chỉ giữa các đơn, lấy địa chỉ của đơn hàng gần nhất
+    select
+        customer_unique_id,
+        city,
+        state,
+        zip_code,
+        row_number() over (
+            partition by customer_unique_id
+            order by order_purchase_timestamp desc, order_id desc
+        ) as rn
+    from customer_order_history
+),
+
+latest_address as (
+    select
+        customer_unique_id,
+        city,
+        state,
+        zip_code
+    from latest_address_ranked
+    where rn = 1
+),
+
+customer_metrics_all as (
+    select
+        customer_unique_id,
+        min(order_purchase_timestamp) as first_order_date,
+        max(order_purchase_timestamp) as most_recent_order_date,
+        count(distinct order_id) as total_orders,
+        sum(order_payment_value) as lifetime_spend
+    from customer_order_history
+    group by customer_unique_id
+),
+
+{% if is_incremental() %}
 affected_customers as (
-    select distinct c.customer_unique_id
-    from customers c
-    inner join orders o
-        on c.customer_id = o.customer_id
+    -- 1. Khách có đơn mới trong cửa sổ lookback 3 ngày
+    select distinct customer_unique_id
+    from customer_order_history
     where
-        o.order_purchase_timestamp >= (
+        order_purchase_timestamp >= (
             select dateadd(day, -3, coalesce(max(tgt.most_recent_order_date), cast('2016-01-01' as timestamp)))
             from {{ this }} tgt
         )
 
     union
 
-    select distinct c.customer_unique_id
-    from customers c
-    where
-        not exists (
-            select 1
-            from {{ this }} target
-            where target.customer_id = c.customer_id
-        )
+    -- 2. Khách hàng mới chưa tồn tại trong bảng đích {{ this }}
+    select cm.customer_unique_id
+    from customer_metrics_all cm
+    left join {{ this }} target
+        on cm.customer_unique_id = target.customer_unique_id
+    where target.customer_unique_id is null
 
     union
 
-    select distinct c.customer_unique_id
-    from customers c
+    -- 3. Khách cũ có thay đổi lifetime_spend (late payment), total_orders hoặc địa chỉ gần nhất
+    select cm.customer_unique_id
+    from customer_metrics_all cm
+    inner join latest_address la
+        on cm.customer_unique_id = la.customer_unique_id
     inner join {{ this }} target
-        on c.customer_id = target.customer_id
-    left join current_customer_metrics cm
-        on c.customer_unique_id = cm.customer_unique_id
+        on cm.customer_unique_id = target.customer_unique_id
     where
         coalesce(cm.lifetime_spend, 0) <> coalesce(target.lifetime_spend, 0)
         or coalesce(cm.total_orders, 0) <> coalesce(target.total_orders, 0)
-        or coalesce(c.city, '') <> coalesce(target.city, '')
-        or coalesce(c.state, '') <> coalesce(target.state, '')
-        or coalesce(c.zip_code, '') <> coalesce(target.zip_code, '')
+        or coalesce(la.city, '') <> coalesce(target.city, '')
+        or coalesce(la.state, '') <> coalesce(target.state, '')
+        or coalesce(la.zip_code, '') <> coalesce(target.zip_code, '')
 ),
 
--- 2. Lấy toàn bộ các customer_id gắn với những customer_unique_id bị ảnh hưởng (cả cũ lẫn mới)
-target_customers as (
-    select c.*
-    from customers c
+target_customer_metrics as (
+    select cm.*
+    from customer_metrics_all cm
     inner join affected_customers ac
-        on c.customer_unique_id = ac.customer_unique_id
-),
-
--- 3. Lấy toàn bộ lịch sử đơn hàng của nhóm khách hàng bị ảnh hưởng để aggregate LTV chính xác
-target_orders as (
-    select o.*
-    from orders o
-    inner join target_customers tc
-        on o.customer_id = tc.customer_id
+        on cm.customer_unique_id = ac.customer_unique_id
 ),
 {% else %}
-target_customers as (
-    select * from customers
-),
-
-target_orders as (
-    select * from orders
+target_customer_metrics as (
+    select * from customer_metrics_all
 ),
 {% endif %}
 
-customer_orders as (
-    select
-        tc.customer_unique_id,
-        min(ord.order_purchase_timestamp) as first_order_date,
-        max(ord.order_purchase_timestamp) as most_recent_order_date,
-        count(distinct ord.order_id) as total_orders,
-        coalesce(sum(p.total_payment), 0) as lifetime_spend
-    from target_customers tc
-    inner join target_orders ord
-        on tc.customer_id = ord.customer_id
-    left join payments_by_order p
-        on ord.order_id = p.order_id
-    group by tc.customer_unique_id
-),
-
 final as (
     select
-        tc.customer_id,
-        tc.customer_unique_id,
-        tc.city,
-        tc.state,
-        tc.zip_code,
-        co.first_order_date,
-        co.most_recent_order_date,
-        co.total_orders,
-        co.lifetime_spend,
+        cm.customer_unique_id,
+        la.city,
+        la.state,
+        la.zip_code,
+        cm.first_order_date,
+        cm.most_recent_order_date,
+        cm.total_orders,
+        cm.lifetime_spend,
         case
-            when co.total_orders > 1 then 'Returning Customer'
+            when cm.total_orders > 1 then 'Returning Customer'
             else 'One-Time Customer'
         end as customer_segment
-    from target_customers tc
-    left join customer_orders co
-        on tc.customer_unique_id = co.customer_unique_id
+    from target_customer_metrics cm
+    inner join latest_address la
+        on cm.customer_unique_id = la.customer_unique_id
 )
 
 select * from final
